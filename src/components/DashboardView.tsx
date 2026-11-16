@@ -4,7 +4,11 @@ import {
   BadgeCheck,
   CalendarClock,
   CheckCircle2,
+  ChevronDown,
+  ChevronUp,
+  ExternalLink,
   FileSignature,
+  FolderOpen,
   MessageCircle,
   Receipt,
   TrendingUp,
@@ -13,6 +17,7 @@ import {
 import {
   ClientCase,
   InstallmentWithStatus,
+  ZapSignCrossReferenceItem,
   ZapSignSignedDoc,
 } from '../types/honorarios';
 import {
@@ -24,11 +29,16 @@ import {
   getAttentionTodayList,
   getAvailableMonthOptions,
 } from '../utils/honorariosLogic';
+import {
+  extractPrimarySignerName,
+  formatZapSignDateBR,
+} from '../utils/zapsignLogic';
 
 interface DashboardViewProps {
   clients: ClientCase[];
   todayISO: string;
   unmatchedZapSignDocs?: ZapSignSignedDoc[];
+  unmatchedZapSignItems?: ZapSignCrossReferenceItem[];
   zapSignSignedCount?: number;
   onMarkPaid: (item: InstallmentWithStatus) => void;
   onOpenWhatsApp: (item: InstallmentWithStatus) => void;
@@ -96,6 +106,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
   clients,
   todayISO,
   unmatchedZapSignDocs = [],
+  unmatchedZapSignItems,
   onMarkPaid,
   onOpenWhatsApp,
   onNavigateTab,
@@ -106,6 +117,17 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
   const [hoveredMonthKey, setHoveredMonthKey] = useState<string | null>(null);
   const [hoveredTooltipId, setHoveredTooltipId] = useState<string | null>(null);
   const [pinnedTooltipId, setPinnedTooltipId] = useState<string | null>(null);
+  const [zapSignExpanded, setZapSignExpanded] = useState(false);
+
+  const auditItems: ZapSignCrossReferenceItem[] = useMemo(() => {
+    if (unmatchedZapSignItems) return unmatchedZapSignItems;
+    return unmatchedZapSignDocs.map((doc) => ({
+      doc,
+      primarySignerName: extractPrimarySignerName(doc),
+      auditStatus: 'missing_in_spreadsheet',
+      inSpreadsheet: false,
+    }));
+  }, [unmatchedZapSignItems, unmatchedZapSignDocs]);
 
   const openTooltipId = pinnedTooltipId ?? hoveredTooltipId;
 
@@ -207,27 +229,110 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
       </div>
 
       {/* Discrete ZapSign Unmatched Audit Notice */}
-      {unmatchedZapSignDocs.length > 0 && (
+      {auditItems.length > 0 && (
         <div
           role="status"
-          className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between rounded-xl border border-[#DCB14A] bg-white px-4 py-3 text-xs text-[#313131]"
+          data-testid="dashboard-zapsign-banner"
+          className="rounded-xl border border-[#DCB14A] bg-white px-4 py-3 text-xs text-[#313131] space-y-3"
         >
-          <div className="flex items-center gap-2.5">
-            <FileSignature className="h-4 w-4 shrink-0 text-[#8D6A14]" />
-            <span>
-              <strong className="font-semibold">
-                {unmatchedZapSignDocs.length} contrato(s) assinado(s) no ZapSign
-              </strong>{' '}
-              ainda não constam na planilha de honorários.
-            </span>
+          <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+            <div className="flex items-center gap-2.5">
+              <FileSignature className="h-4 w-4 shrink-0 text-[#8D6A14]" />
+              <span>
+                <strong className="font-semibold">
+                  {auditItems.length}{' '}
+                  {auditItems.length === 1
+                    ? 'contrato assinado no ZapSign'
+                    : 'contratos assinados no ZapSign'}
+                </strong>{' '}
+                ainda não constam na planilha de honorários (excluindo ZZ - Encerrados).
+              </span>
+            </div>
+            <div className="flex flex-wrap items-center gap-3 shrink-0">
+              <button
+                type="button"
+                onClick={() => setZapSignExpanded((prev) => !prev)}
+                aria-expanded={zapSignExpanded}
+                data-testid="dashboard-zapsign-toggle-btn"
+                className="inline-flex items-center gap-1 rounded-md border border-[#313131]/20 bg-[#F6F3EC] px-2.5 py-1 text-[11px] font-medium text-[#313131] hover:border-[#DCB14A] hover:bg-white whitespace-nowrap"
+              >
+                <span>
+                  {zapSignExpanded
+                    ? 'Ocultar lista'
+                    : `Ver lista (${auditItems.length})`}
+                </span>
+                {zapSignExpanded ? (
+                  <ChevronUp className="h-3 w-3 text-[#8D6A14]" />
+                ) : (
+                  <ChevronDown className="h-3 w-3 text-[#8D6A14]" />
+                )}
+              </button>
+              <button
+                type="button"
+                onClick={() => onNavigateTab('clientes')}
+                className="text-left sm:text-right font-semibold text-[#8D6A14] underline underline-offset-4 hover:text-[#313131] whitespace-nowrap shrink-0"
+              >
+                Conferir em Clientes &amp; Processos
+              </button>
+            </div>
           </div>
-          <button
-            type="button"
-            onClick={() => onNavigateTab('clientes')}
-            className="text-left sm:text-right font-semibold text-[#8D6A14] underline underline-offset-4 hover:text-[#313131] whitespace-nowrap shrink-0"
-          >
-            Conferir em Clientes &amp; Processos
-          </button>
+
+          {zapSignExpanded && (
+            <ul className="max-h-64 overflow-y-auto divide-y divide-[#313131]/10 rounded-lg border border-[#313131]/10 bg-[#F6F3EC]/60">
+              {auditItems.map((item) => {
+                const signedDateLabel = formatZapSignDateBR(item.doc.signedAt);
+                return (
+                  <li
+                    key={item.doc.token}
+                    className="flex flex-col gap-1.5 px-3.5 py-2.5 text-xs sm:flex-row sm:items-center sm:justify-between"
+                  >
+                    <div className="min-w-0">
+                      <p className="font-semibold text-[#313131]">
+                        {item.primarySignerName}
+                      </p>
+                      <p className="text-[11px] text-[#313131]/65 truncate">
+                        Documento: {item.doc.name}
+                      </p>
+                    </div>
+                    <div className="flex flex-wrap items-center gap-3 shrink-0 tabular-nums">
+                      {signedDateLabel && (
+                        <span className="text-[11px] text-[#313131]/70">
+                          Assinado em {signedDateLabel}
+                        </span>
+                      )}
+                      {item.driveFolder ? (
+                        <a
+                          href={item.driveFolder.urlPasta}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="inline-flex items-center gap-1 rounded border border-[#DCB14A]/60 bg-white px-2 py-0.5 text-[11px] font-medium text-[#313131] hover:border-[#8D6A14]"
+                        >
+                          <FolderOpen className="h-3 w-3 text-[#8D6A14]" />
+                          Pasta no Drive ({item.driveFolder.etapa})
+                          <ExternalLink className="h-2.5 w-2.5 opacity-60" />
+                        </a>
+                      ) : (
+                        <span className="text-[11px] text-[#313131]/55">
+                          Sem pasta no Drive
+                        </span>
+                      )}
+                      {item.doc.signedFileUrl && (
+                        <a
+                          href={item.doc.signedFileUrl}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="inline-flex items-center gap-1 text-[11px] font-semibold text-[#8D6A14] hover:underline"
+                        >
+                          Ver PDF
+                          <ExternalLink className="h-3 w-3" />
+                        </a>
+                      )}
+                    </div>
+                  </li>
+                );
+              })}
+            </ul>
+          )}
         </div>
       )}
 

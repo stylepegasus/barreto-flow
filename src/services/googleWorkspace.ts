@@ -21,6 +21,11 @@ import {
 } from '../utils/sheetArchitecture';
 import { mapAppsScriptPayload } from '../utils/appsScriptMapper';
 
+export const DEFAULT_APPS_SCRIPT_URL =
+  'https://script.google.com/macros/s/AKfycbxz9gSeBsBVBAWNbLZOn4S4NSWQop7sk7FokMc_0bFzDqdLxRzGlmkDYAe1fFA5ruM2wA/exec';
+
+const APPS_SCRIPT_SYNC_TIMEOUT_MS = 75_000;
+
 export interface WorkspaceDiscoveryResult {
   spreadsheetId: string | null;
   spreadsheetTitle: string | null;
@@ -326,12 +331,32 @@ export async function syncCalendarBillingEvent(
  * Executa exclusivamente fetch GET (sem alterações na planilha ou agenda).
  */
 export async function syncFromAppsScriptUrl(
-  appsScriptUrl: string
+  appsScriptUrl: string = DEFAULT_APPS_SCRIPT_URL
 ): Promise<AppsScriptSyncResult> {
-  const res = await fetch(appsScriptUrl, {
-    method: 'GET',
-    redirect: 'follow',
-  });
+  const targetUrl = (appsScriptUrl || '').trim() || DEFAULT_APPS_SCRIPT_URL;
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), APPS_SCRIPT_SYNC_TIMEOUT_MS);
+
+  let res: Response;
+  try {
+    res = await fetch(targetUrl, {
+      method: 'GET',
+      redirect: 'follow',
+      signal: controller.signal,
+    });
+  } catch (err: unknown) {
+    if (err instanceof Error && err.name === 'AbortError') {
+      throw new Error(
+        'Tempo limite excedido ao sincronizar a planilha e o Google Drive. Tente novamente em instantes.'
+      );
+    }
+    throw new Error(
+      'Falha de conexão ao consultar o Web App do Google Apps Script. Verifique sua internet e tente novamente.'
+    );
+  } finally {
+    clearTimeout(timeoutId);
+  }
+
   if (!res.ok) {
     throw new Error(
       `O Web App retornou erro ${res.status}. Verifique se a implantação está como "Qualquer pessoa".`
@@ -423,6 +448,7 @@ export async function syncFromAppsScriptUrl(
   return {
     clients: legacyClients,
     calendarEvents: [],
+    driveEtapas: [],
     summary: {
       syncedAt: new Date().toISOString(),
       clientesCount: legacyClients.length,

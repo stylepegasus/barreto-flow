@@ -130,19 +130,28 @@ export const Sidebar: React.FC<SidebarProps> = ({
         </div>
 
         {googleUserEmail && (
-          <div className="flex items-center justify-between gap-2 rounded-lg bg-black/20 px-3 py-2">
+          <div className="flex items-center justify-between gap-2 rounded-lg border border-white/10 bg-black/25 px-3 py-2.5">
             <div className="min-w-0">
-              <p className="text-[11px] text-[#F6F3EC]/55">Conta Google</p>
-              <p className="truncate text-xs text-white/95">{googleUserEmail}</p>
+              <p className="text-[10px] font-medium uppercase tracking-wider text-[#F6F3EC]/55">
+                Conta autorizada
+              </p>
+              <p
+                className="truncate text-xs font-medium text-white/95"
+                title={googleUserEmail}
+              >
+                {googleUserEmail}
+              </p>
             </div>
             <button
               type="button"
               onClick={onGoogleSignOut}
-              aria-label="Sair da conta Google"
-              title="Sair da conta Google"
-              className="shrink-0 rounded p-1.5 text-white/70 hover:bg-white/10 hover:text-white"
+              data-testid="sidebar-logout-btn"
+              aria-label="Sair"
+              title="Encerrar sessão"
+              className="inline-flex shrink-0 items-center gap-1 rounded-md border border-white/15 bg-white/5 px-2.5 py-1.5 text-[11px] font-medium text-[#F6F3EC] transition-colors hover:border-[#DCB14A]/60 hover:bg-white/10 hover:text-[#FFD559]"
             >
               <LogOut className="h-3.5 w-3.5" />
+              <span>Sair</span>
             </button>
           </div>
         )}

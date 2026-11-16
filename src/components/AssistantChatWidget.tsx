@@ -18,6 +18,7 @@ import {
   DriveFileItem,
 } from '../types/honorarios';
 import { fetchDriveFileContent } from '../services/googleWorkspace';
+import { getFirebaseIdToken } from '../services/googleAuth';
 import {
   AssistantContextExtras,
   buildDocumentAnalysisPrompt,
@@ -202,9 +203,19 @@ export const AssistantChatWidget: React.FC<AssistantChatWidgetProps> = ({
       }
 
       setLoadingStage('thinking');
+      const idToken = await getFirebaseIdToken();
+      if (!idToken) {
+        throw new Error(
+          'Sua sessão expirou. Faça login novamente com uma conta Google autorizada.'
+        );
+      }
+
       const res = await fetch('/api/assistant/chat', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${idToken}`,
+        },
         body: JSON.stringify({
           message: trimmed,
           history: historySnapshot,

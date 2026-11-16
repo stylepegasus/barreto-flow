@@ -1,11 +1,12 @@
 import React from 'react';
 
 interface BrandMarkProps {
-  size?: 'sm' | 'md';
+  size?: 'sm' | 'md' | 'lg';
 }
 
 export const BrandMark: React.FC<BrandMarkProps> = ({ size = 'md' }) => {
-  const dimension = size === 'sm' ? 'h-8 w-8' : 'h-11 w-11';
+  const dimension =
+    size === 'sm' ? 'h-8 w-8' : size === 'lg' ? 'h-14 w-14' : 'h-11 w-11';
 
   return (
     <svg

@@ -218,3 +218,25 @@ test('mapAppsScriptPayload skips undated parcelas instead of dumping them onto t
   assert.equal(result.clients[0].contractedTotal, 3000);
   assert.equal(result.clients[0].installments.length, 0);
 });
+
+test('mapAppsScriptPayload preserves raw driveEtapas including ZZ - Encerrados', () => {
+  const result = mapAppsScriptPayload(
+    {
+      clientes: [],
+      parcelas: [],
+      driveEtapas: [
+        {
+          etapa: 'ZZ - Encerrados',
+          nomePasta: 'Ex-Cliente Arquivado',
+          urlPasta: 'https://drive.google.com/drive/folders/closed-1',
+        },
+      ],
+      eventosAgenda: [],
+    },
+    '2026-11-16'
+  );
+
+  assert.equal(result.driveEtapas.length, 1);
+  assert.equal(result.driveEtapas[0].etapa, 'ZZ - Encerrados');
+  assert.equal(result.driveEtapas[0].nomePasta, 'Ex-Cliente Arquivado');
+});

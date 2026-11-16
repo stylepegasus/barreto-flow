@@ -3,11 +3,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
-import { Menu } from 'lucide-react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { AlertTriangle, Menu, RefreshCw } from 'lucide-react';
 import {
   ActiveTab,
   AppsScriptCalendarEventRow,
+  AppsScriptDriveEtapaRow,
   AppsScriptSyncResult,
   ChatMessage,
   ClientCase,
@@ -41,12 +42,15 @@ import { AssistantContextExtras } from './utils/assistantContext';
 import { parseSheetTabToClients } from './utils/sheetArchitecture';
 import { createDemoClients } from './data/demoData';
 import {
+  getFirebaseIdToken,
   getWorkspaceAccessToken,
-  initGoogleAuth,
+  signInAppWithGoogle,
   signInWithGoogleWorkspace,
   signOutGoogleWorkspace,
+  subscribeAppAuth,
 } from './services/googleAuth';
 import {
+  DEFAULT_APPS_SCRIPT_URL,
   discoverBarretoWorkspace,
   inspectAndFetchGoogleSheet,
   postActionToAppsScript,
@@ -56,6 +60,7 @@ import {
 } from './services/googleWorkspace';
 import { Sidebar } from './components/Sidebar';
 import { BrandMark } from './components/BrandMark';
+import { LoginView } from './components/LoginView';
 import { DashboardView } from './components/DashboardView';
 import { CalendarView } from './components/CalendarView';
 import { ClientsView } from './components/ClientsView';
@@ -73,8 +78,6 @@ const STORAGE_CONFIG_KEY = 'barreto_honorarios_config_v1';
 const STORAGE_DEMO_CLIENTS_KEY = 'barreto_honorarios_demo_clients_v1';
 const STORAGE_GOALS_KEY = 'barreto_honorarios_goals_v1';
 const STORAGE_SIMULATOR_KEY = 'barreto_honorarios_simulator_v1';
-const DEFAULT_APPS_SCRIPT_URL =
-  'https://script.google.com/macros/s/AKfycbxz9gSeBsBVBAWNbLZOn4S4NSWQop7sk7FokMc_0bFzDqdLxRzGlmkDYAe1fFA5ruM2wA/exec';
 
 interface PendingConfirmAction {
   type: 'pay' | 'reschedule';
@@ -94,13 +97,13 @@ export default function App() {
       if (saved) {
         const parsed = JSON.parse(saved) as Partial<SyncConfig>;
         return {
-          appsScriptUrl: parsed.appsScriptUrl || DEFAULT_APPS_SCRIPT_URL,
+          appsScriptUrl: (parsed.appsScriptUrl ?? '').trim() || DEFAULT_APPS_SCRIPT_URL,
           spreadsheetId: parsed.spreadsheetId ?? '',
           spreadsheetName:
             parsed.spreadsheetName ?? 'Barreto — Honorários (Ads Família)',
           driveRootFolderName: 'Clientes Tráfego Pago',
-          lastSyncedAt: parsed.lastSyncedAt ?? null,
-          sourceMode: parsed.sourceMode ?? 'demo',
+          lastSyncedAt: null,
+          sourceMode: 'demo',
           readOnlyMode: parsed.readOnlyMode ?? true,
         };
       }
@@ -145,6 +148,13 @@ export default function App() {
   const [cachedDriveSummary, setCachedDriveSummary] =
     useState<DriveArchitectureSummary | null>(null);
 
+  const [authStatus, setAuthStatus] = useState<
+    'checking' | 'unauthenticated' | 'unauthorized' | 'authorized'
+  >('checking');
+  const [isSigningIn, setIsSigningIn] = useState(false);
+  const [rejectedEmail, setRejectedEmail] = useState<string | null>(null);
+  const [authError, setAuthError] = useState<string | null>(null);
+
   const [googleUserEmail, setGoogleUserEmail] = useState<string | null>(null);
   const [googleConnected, setGoogleConnected] = useState(false);
   const [isSyncing, setIsSyncing] = useState(false);
@@ -165,6 +175,13 @@ export default function App() {
   const [calendarEvents, setCalendarEvents] = useState<
     AppsScriptCalendarEventRow[]
   >([]);
+  const [driveEtapas, setDriveEtapas] = useState<AppsScriptDriveEtapaRow[]>(
+    []
+  );
+  const [isAutoSyncing, setIsAutoSyncing] = useState(false);
+  const [autoSyncError, setAutoSyncError] = useState<string | null>(null);
+  const autoSyncTriggeredRef = useRef(false);
+
   const [chatOpen, setChatOpen] = useState(false);
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
   const [pendingDocumentRequest, setPendingDocumentRequest] =
@@ -279,9 +296,17 @@ export default function App() {
   }, [clients, config.sourceMode]);
 
   const fetchZapSignSigned = useCallback(async () => {
+    if (authStatus !== 'authorized') return;
+    const idToken = await getFirebaseIdToken();
+    if (!idToken) return;
+
     setZapSignState((prev) => ({ ...prev, loading: true, error: null }));
     try {
-      const res = await fetch('/api/zapsign/signed');
+      const res = await fetch('/api/zapsign/signed', {
+        headers: {
+          Authorization: `Bearer ${idToken}`,
+        },
+      });
       const payload = (await res.json().catch(() => ({}))) as {
         configured?: boolean;
         docs?: ZapSignSignedDoc[];
@@ -309,23 +334,38 @@ export default function App() {
             : 'Falha ao consultar o ZapSign.',
       }));
     }
-  }, []);
+  }, [authStatus]);
 
   useEffect(() => {
-    void fetchZapSignSigned();
-  }, [fetchZapSignSigned]);
+    if (authStatus === 'authorized') {
+      void fetchZapSignSigned();
+    }
+  }, [authStatus, fetchZapSignSigned]);
 
   useEffect(() => {
-    const unsubscribe = initGoogleAuth(
-      (user) => {
+    const unsubscribe = subscribeAppAuth({
+      onAuthorized: (user, workspaceToken) => {
+        setAuthStatus('authorized');
+        setRejectedEmail(null);
+        setAuthError(null);
         setGoogleUserEmail(user.email ?? user.displayName ?? 'Conta Google');
-        setGoogleConnected(true);
+        setGoogleConnected(Boolean(workspaceToken));
       },
-      (user) => {
-        setGoogleUserEmail(user?.email ?? null);
+      onUnauthorized: (rejected) => {
+        setAuthStatus('unauthorized');
+        setRejectedEmail(rejected || null);
+        setAuthError(null);
+        setGoogleUserEmail(null);
         setGoogleConnected(false);
-      }
-    );
+      },
+      onUnauthenticated: () => {
+        setGoogleUserEmail(null);
+        setGoogleConnected(false);
+        setAuthStatus((prev) =>
+          prev === 'unauthorized' ? 'unauthorized' : 'unauthenticated'
+        );
+      },
+    });
     return () => unsubscribe();
   }, []);
 
@@ -503,41 +543,106 @@ export default function App() {
     }
   };
 
+  const handleAppSignIn = async () => {
+    setIsSigningIn(true);
+    setAuthError(null);
+    try {
+      const res = await signInAppWithGoogle();
+      if (!res.authorized) {
+        setAuthStatus('unauthorized');
+        setRejectedEmail(res.rejectedEmail || null);
+        setGoogleUserEmail(null);
+        setGoogleConnected(false);
+        return;
+      }
+      setAuthStatus('authorized');
+      setRejectedEmail(null);
+      setAuthError(null);
+      setGoogleUserEmail(
+        res.user.email ?? res.user.displayName ?? 'Conta Google'
+      );
+      setGoogleConnected(Boolean(res.accessToken));
+    } catch (err: unknown) {
+      const code =
+        typeof err === 'object' && err !== null && 'code' in err
+          ? String((err as { code?: unknown }).code)
+          : '';
+      if (
+        code === 'auth/popup-closed-by-user' ||
+        code === 'auth/cancelled-popup-request'
+      ) {
+        setAuthError('Login cancelado antes da conclusão.');
+      } else {
+        setAuthError(
+          err instanceof Error
+            ? err.message
+            : 'Não foi possível concluir o login com o Google.'
+        );
+      }
+    } finally {
+      setIsSigningIn(false);
+    }
+  };
+
   const handleGoogleSignOut = async () => {
     await signOutGoogleWorkspace();
+    setAuthStatus('unauthenticated');
+    setRejectedEmail(null);
+    setAuthError(null);
     setGoogleUserEmail(null);
     setGoogleConnected(false);
+    setChatOpen(false);
+    setChatMessages([]);
+    setMobileMenuOpen(false);
+    setZapSignState({
+      configured: false,
+      loading: false,
+      docs: [],
+      error: null,
+      lastFetchedAt: null,
+    });
+    autoSyncTriggeredRef.current = false;
+    setIsAutoSyncing(false);
+    setAutoSyncError(null);
+    setDriveEtapas([]);
+    setCalendarEvents([]);
+    setAppsScriptSummary(null);
     setArchitectureSnapshot(null);
     setCachedTabRowsByTitle({});
     setCachedDriveSummary(null);
-    if (config.sourceMode === 'google_workspace') {
-      setConfig((prev) => ({ ...prev, sourceMode: 'demo' }));
-      setClients(createDemoClients(todayISO));
-    }
+    setConfig((prev) => ({ ...prev, sourceMode: 'demo', lastSyncedAt: null }));
+    setClients(createDemoClients(todayISO));
     setSyncMessage({
       type: 'success',
-      text: 'Conta Google desconectada. Exibindo dados de demonstração.',
+      text: 'Sessão encerrada.',
     });
   };
 
-  const handleSyncAppsScript = async (url: string) => {
+  const handleSyncAppsScript = useCallback(async (url?: string) => {
+    const effectiveUrl = (url ?? '').trim() || DEFAULT_APPS_SCRIPT_URL;
     setIsSyncing(true);
     setSyncMessage(null);
+    setAutoSyncError(null);
     try {
-      const result = await syncFromAppsScriptUrl(url);
+      const result = await syncFromAppsScriptUrl(effectiveUrl);
       if (result.clients.length === 0) {
+        const emptyMsg =
+          'O Web App respondeu, mas não retornou registros de clientes.';
+        setAutoSyncError(emptyMsg);
         setSyncMessage({
           type: 'error',
-          text: 'O Web App respondeu, mas não retornou registros de clientes.',
+          text: emptyMsg,
         });
         return;
       }
       setClients(result.clients);
       setCalendarEvents(result.calendarEvents);
+      setDriveEtapas(result.driveEtapas);
       setAppsScriptSummary(result.summary);
+      setAutoSyncError(null);
       setConfig((prev) => ({
         ...prev,
-        appsScriptUrl: url,
+        appsScriptUrl: effectiveUrl,
         lastSyncedAt: new Date().toISOString(),
         sourceMode: 'apps_script',
         readOnlyMode: true,
@@ -546,23 +651,40 @@ export default function App() {
         type: 'success',
         text: `Planilha real sincronizada via GET (Somente Leitura): ${result.summary.clientesCount} clientes, ${result.summary.parcelasCount} parcelas, ${result.summary.matchedDriveCount} pastas do Drive (${result.summary.driveFilesCount} arquivos) e ${result.summary.eventosAgendaCount} eventos na agenda.`,
       });
-    } catch (err: any) {
+    } catch (err: unknown) {
+      const errorText =
+        err instanceof Error && err.message
+          ? err.message
+          : 'Não foi possível conectar à URL do Google Apps Script informada.';
+      setAutoSyncError(errorText);
       setSyncMessage({
         type: 'error',
-        text:
-          err?.message ??
-          'Não foi possível conectar à URL do Google Apps Script informada.',
+        text: errorText,
       });
     } finally {
       setIsSyncing(false);
     }
-  };
+  }, []);
+
+  useEffect(() => {
+    if (authStatus === 'authorized' && !autoSyncTriggeredRef.current) {
+      autoSyncTriggeredRef.current = true;
+      setIsAutoSyncing(true);
+      void handleSyncAppsScript(config.appsScriptUrl || DEFAULT_APPS_SCRIPT_URL).finally(
+        () => {
+          setIsAutoSyncing(false);
+        }
+      );
+    }
+  }, [authStatus, config.appsScriptUrl, handleSyncAppsScript]);
 
   const handleResetDemo = () => {
     const fresh = createDemoClients(todayISO);
     setClients(fresh);
     setCalendarEvents([]);
+    setDriveEtapas([]);
     setAppsScriptSummary(null);
+    setAutoSyncError(null);
     setConfig((prev) => ({
       ...prev,
       sourceMode: 'demo',
@@ -701,8 +823,8 @@ export default function App() {
   );
 
   const zapSignMatchResult = useMemo(
-    () => matchZapSignToClients(clients, zapSignState.docs),
-    [clients, zapSignState.docs]
+    () => matchZapSignToClients(clients, zapSignState.docs, driveEtapas),
+    [clients, zapSignState.docs, driveEtapas]
   );
 
   const assistantContextExtras: AssistantContextExtras = useMemo(
@@ -713,6 +835,7 @@ export default function App() {
       simulatorOutputs,
       zapSignDocs: zapSignState.docs,
       unmatchedZapSignDocs: zapSignMatchResult.unmatchedDocs,
+      unmatchedZapSignItems: zapSignMatchResult.unmatchedAuditItems,
     }),
     [
       goalsByMonth,
@@ -720,6 +843,7 @@ export default function App() {
       simulatorOutputs,
       zapSignState.docs,
       zapSignMatchResult.unmatchedDocs,
+      zapSignMatchResult.unmatchedAuditItems,
     ]
   );
 
@@ -765,6 +889,18 @@ export default function App() {
     config.sourceMode === 'google_workspace' ||
     config.sourceMode === 'apps_script';
 
+  if (authStatus !== 'authorized') {
+    return (
+      <LoginView
+        status={authStatus}
+        isSigningIn={isSigningIn}
+        rejectedEmail={rejectedEmail}
+        errorMessage={authError}
+        onSignInWithGoogle={handleAppSignIn}
+      />
+    );
+  }
+
   return (
     <div className="min-h-screen flex bg-[#F6F3EC] text-[#313131]">
       <Sidebar
@@ -809,11 +945,66 @@ export default function App() {
         )}
 
         <main className="flex-1 px-4 pt-6 pb-24 sm:px-8 sm:pt-8 lg:px-10 lg:pt-10 max-w-[1400px] w-full mx-auto">
+          {/* Initial Automatic Sync Status / Error Banner */}
+          {isAutoSyncing && config.sourceMode !== 'apps_script' && (
+            <div
+              role="status"
+              data-testid="auto-sync-loading-banner"
+              className="mb-6 flex items-center gap-3 rounded-xl border border-[#DCB14A]/60 bg-white px-4 py-3 text-xs text-[#313131]"
+            >
+              <RefreshCw className="h-4 w-4 shrink-0 animate-spin text-[#8D6A14]" />
+              <span>
+                Sincronizando planilha oficial e Google Drive em modo{' '}
+                <strong className="font-semibold">Somente Leitura</strong>...
+              </span>
+            </div>
+          )}
+
+          {!isAutoSyncing &&
+            autoSyncError &&
+            config.sourceMode !== 'apps_script' && (
+              <div
+                role="alert"
+                data-testid="auto-sync-error-banner"
+                className="mb-6 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between rounded-xl border border-red-700/30 bg-red-50 px-4 py-3 text-xs text-red-950"
+              >
+                <div className="flex items-start gap-2.5">
+                  <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-red-700" />
+                  <div>
+                    <p className="font-semibold">
+                      Não foi possível carregar a planilha oficial automaticamente.
+                    </p>
+                    <p className="mt-0.5 text-red-900/85">{autoSyncError}</p>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setIsAutoSyncing(true);
+                    void handleSyncAppsScript(
+                      config.appsScriptUrl || DEFAULT_APPS_SCRIPT_URL
+                    ).finally(() => setIsAutoSyncing(false));
+                  }}
+                  disabled={isSyncing}
+                  data-testid="retry-apps-script-sync-btn"
+                  className="inline-flex items-center gap-1.5 self-start sm:self-center rounded-lg bg-[#313131] px-3.5 py-2 text-xs font-medium text-white hover:bg-[#313131]/90 disabled:opacity-50 whitespace-nowrap shrink-0"
+                >
+                  <RefreshCw
+                    className={`h-3.5 w-3.5 text-[#FFD559] ${
+                      isSyncing ? 'animate-spin' : ''
+                    }`}
+                  />
+                  Tentar sincronizar novamente
+                </button>
+              </div>
+            )}
+
           {activeTab === 'dashboard' && (
             <DashboardView
               clients={clients}
               todayISO={todayISO}
               unmatchedZapSignDocs={zapSignMatchResult.unmatchedDocs}
+              unmatchedZapSignItems={zapSignMatchResult.unmatchedAuditItems}
               zapSignSignedCount={zapSignState.docs.length}
               onMarkPaid={requestMarkPaid}
               onOpenWhatsApp={setWhatsAppItem}
@@ -856,6 +1047,7 @@ export default function App() {
               zapSignState={zapSignState}
               matchedZapSignByClientId={zapSignMatchResult.matchedByClientId}
               unmatchedZapSignDocs={zapSignMatchResult.unmatchedDocs}
+              unmatchedZapSignItems={zapSignMatchResult.unmatchedAuditItems}
               onRefreshZapSign={fetchZapSignSigned}
               onQuitarParcela={requestMarkPaid}
               onAlterarData={setRescheduleItem}

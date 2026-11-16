@@ -51,6 +51,7 @@ export interface ClientCase {
   caseType: string;
   processNumber?: string;
   driveStage: DriveStage;
+  rawDriveStage?: string;
   driveFolderUrl: string;
   driveFiles?: DriveFileItem[];
   modality: PaymentModality;
@@ -246,6 +247,7 @@ export interface AppsScriptPayload {
 export interface AppsScriptSyncResult {
   clients: ClientCase[];
   calendarEvents: AppsScriptCalendarEventRow[];
+  driveEtapas: AppsScriptDriveEtapaRow[];
   summary: {
     syncedAt: string;
     clientesCount: number;
@@ -337,6 +339,27 @@ export interface ZapSignState {
   error: string | null;
   lastFetchedAt: string | null;
   docs: ZapSignSignedDoc[];
+}
+
+export interface ZapSignDriveFolderInfo {
+  etapa: string;
+  nomePasta: string;
+  urlPasta: string;
+  isClosed: boolean;
+}
+
+export type ZapSignAuditStatus =
+  | 'matched_spreadsheet'
+  | 'closed_archive'
+  | 'missing_in_spreadsheet';
+
+export interface ZapSignCrossReferenceItem {
+  doc: ZapSignSignedDoc;
+  primarySignerName: string;
+  auditStatus: ZapSignAuditStatus;
+  inSpreadsheet: boolean;
+  matchedClient?: ClientCase;
+  driveFolder?: ZapSignDriveFolderInfo;
 }
 
 

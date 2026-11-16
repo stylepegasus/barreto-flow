@@ -20,6 +20,7 @@ import {
   InstallmentWithStatus,
   PAYMENT_MODALITIES,
   PaymentModality,
+  ZapSignCrossReferenceItem,
   ZapSignSignedDoc,
   ZapSignState,
 } from '../types/honorarios';
@@ -30,7 +31,10 @@ import {
   formatCurrencyBRL,
   formatDateBR,
 } from '../utils/honorariosLogic';
-import { formatZapSignDateBR } from '../utils/zapsignLogic';
+import {
+  extractPrimarySignerName,
+  formatZapSignDateBR,
+} from '../utils/zapsignLogic';
 
 interface ClientsViewProps {
   clients: ClientCase[];
@@ -38,6 +42,7 @@ interface ClientsViewProps {
   zapSignState?: ZapSignState;
   matchedZapSignByClientId?: Record<string, ZapSignSignedDoc[]>;
   unmatchedZapSignDocs?: ZapSignSignedDoc[];
+  unmatchedZapSignItems?: ZapSignCrossReferenceItem[];
   onRefreshZapSign?: () => void;
   onQuitarParcela: (item: InstallmentWithStatus) => void;
   onAlterarData: (item: InstallmentWithStatus) => void;
@@ -75,6 +80,7 @@ export const ClientsView: React.FC<ClientsViewProps> = ({
   zapSignState,
   matchedZapSignByClientId,
   unmatchedZapSignDocs = [],
+  unmatchedZapSignItems,
   onRefreshZapSign,
   onQuitarParcela,
   onAlterarData,
@@ -90,6 +96,15 @@ export const ClientsView: React.FC<ClientsViewProps> = ({
     string | null
   >(null);
   const [zapSignExpanded, setZapSignExpanded] = useState(false);
+
+  const auditItems: ZapSignCrossReferenceItem[] =
+    unmatchedZapSignItems ??
+    unmatchedZapSignDocs.map((doc) => ({
+      doc,
+      primarySignerName: extractPrimarySignerName(doc),
+      auditStatus: 'missing_in_spreadsheet',
+      inSpreadsheet: false,
+    }));
 
   const filtered = filterClients(clients, {
     search,
@@ -147,8 +162,8 @@ export const ClientsView: React.FC<ClientsViewProps> = ({
         </div>
       </div>
 
-      {/* Discrete ZapSign Audit Banner (only signed contracts missing from spreadsheet) */}
-      {unmatchedZapSignDocs.length > 0 && (
+      {/* Discrete ZapSign Audit Banner (only signed contracts missing from spreadsheet, excluding ZZ - Encerrados) */}
+      {auditItems.length > 0 && (
         <div
           data-testid="zapsign-unmatched-banner"
           className="rounded-xl border border-[#DCB14A] bg-white p-4 space-y-3"
@@ -158,14 +173,14 @@ export const ClientsView: React.FC<ClientsViewProps> = ({
               <FileSignature className="mt-0.5 h-4 w-4 text-[#8D6A14] shrink-0" />
               <div>
                 <h2 className="font-serif text-sm font-bold text-[#313131]">
-                  {unmatchedZapSignDocs.length}{' '}
-                  {unmatchedZapSignDocs.length === 1
+                  {auditItems.length}{' '}
+                  {auditItems.length === 1
                     ? 'contrato assinado no ZapSign sem cadastro na planilha'
                     : 'contratos assinados no ZapSign sem cadastro na planilha'}
                 </h2>
                 <p className="mt-0.5 text-xs text-[#313131]/70">
-                  Auditoria automática (somente status Assinado): estes clientes já
-                  assinaram no ZapSign, mas ainda não constam na planilha atual.
+                  Cruzamento ZapSign × Planilha × Google Drive (somente status Assinado,
+                  excluindo pastas em ZZ - Encerrados).
                 </p>
               </div>
             </div>
@@ -180,7 +195,7 @@ export const ClientsView: React.FC<ClientsViewProps> = ({
               <span>
                 {zapSignExpanded
                   ? 'Recolher lista'
-                  : `Ver lista (${unmatchedZapSignDocs.length})`}
+                  : `Ver lista (${auditItems.length})`}
               </span>
               {zapSignExpanded ? (
                 <ChevronUp className="h-3.5 w-3.5 text-[#8D6A14]" />
@@ -192,29 +207,42 @@ export const ClientsView: React.FC<ClientsViewProps> = ({
 
           {zapSignExpanded && (
             <ul className="max-h-72 overflow-y-auto divide-y divide-[#313131]/10 rounded-lg border border-[#313131]/10 bg-[#F6F3EC]/60">
-              {unmatchedZapSignDocs.map((doc) => {
-                const signerLabel = doc.signers.map((s) => s.name).join(', ');
+              {auditItems.map((item) => {
+                const doc = item.doc;
                 const signedDateLabel = formatZapSignDateBR(doc.signedAt);
                 return (
                   <li
                     key={doc.token}
-                    className="flex flex-col gap-1 px-3.5 py-2.5 text-xs sm:flex-row sm:items-center sm:justify-between"
+                    className="flex flex-col gap-1.5 px-3.5 py-2.5 text-xs sm:flex-row sm:items-center sm:justify-between"
                   >
                     <div className="min-w-0">
-                      <span className="font-semibold text-[#313131]">
-                        {doc.name}
-                      </span>
-                      {signerLabel && (
-                        <span className="text-[#313131]/70">
-                          {' '}
-                          · Signatário(s): {signerLabel}
+                      <p className="font-semibold text-[#313131]">
+                        {item.primarySignerName}
+                      </p>
+                      <p className="text-[11px] text-[#313131]/65 truncate">
+                        Documento: {doc.name}
+                      </p>
+                    </div>
+                    <div className="flex flex-wrap items-center gap-3 shrink-0 tabular-nums">
+                      {signedDateLabel && (
+                        <span className="text-[11px] text-[#313131]/70">
+                          Assinado em {signedDateLabel}
                         </span>
                       )}
-                    </div>
-                    <div className="flex items-center gap-3 shrink-0 tabular-nums">
-                      {signedDateLabel && (
-                        <span className="text-[11px] text-[#313131]/65">
-                          Assinado em {signedDateLabel}
+                      {item.driveFolder ? (
+                        <a
+                          href={item.driveFolder.urlPasta}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="inline-flex items-center gap-1 rounded border border-[#DCB14A]/60 bg-white px-2 py-0.5 text-[11px] font-medium text-[#313131] hover:border-[#8D6A14]"
+                        >
+                          <FolderOpen className="h-3 w-3 text-[#8D6A14]" />
+                          Pasta no Drive ({item.driveFolder.etapa})
+                          <ExternalLink className="h-2.5 w-2.5 opacity-60" />
+                        </a>
+                      ) : (
+                        <span className="text-[11px] text-[#313131]/55">
+                          Sem pasta no Drive
                         </span>
                       )}
                       {doc.signedFileUrl && (

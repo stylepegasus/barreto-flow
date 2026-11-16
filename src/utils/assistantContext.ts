@@ -2,6 +2,7 @@ import {
   AppsScriptCalendarEventRow,
   ClientCase,
   DriveFileItem,
+  ZapSignCrossReferenceItem,
 } from '../types/honorarios';
 import {
   addDaysISO,
@@ -46,6 +47,7 @@ export interface AssistantContextExtras {
     signedAt: string;
     signers: Array<{ name: string }>;
   }>;
+  unmatchedZapSignItems?: ZapSignCrossReferenceItem[];
 }
 
 export function buildPortfolioContextSummary(
@@ -142,7 +144,22 @@ export function buildPortfolioContextSummary(
           `- [Token: ${doc.token}] ${doc.name} | Assinado em: ${doc.signedAt} | Signatários: ${signersLabel || 'Não informado'}`
         );
       }
-      if (extras.unmatchedZapSignDocs && extras.unmatchedZapSignDocs.length > 0) {
+      if (
+        extras.unmatchedZapSignItems &&
+        extras.unmatchedZapSignItems.length > 0
+      ) {
+        lines.push(
+          `CONTRATOS ASSINADOS NO ZAPSIGN QUE NÃO CONSTAM NA PLANILHA (${extras.unmatchedZapSignItems.length}, excluindo ZZ - Encerrados):`
+        );
+        for (const item of extras.unmatchedZapSignItems.slice(0, 25)) {
+          const driveLabel = item.driveFolder
+            ? `Pasta no Drive: ${item.driveFolder.etapa}`
+            : 'Sem pasta no Drive';
+          lines.push(
+            `- ALERTA AUDITORIA: Signatário ${item.primarySignerName} | Doc: "${item.doc.name}" (Assinado em ${item.doc.signedAt}) | ${driveLabel}`
+          );
+        }
+      } else if (extras.unmatchedZapSignDocs && extras.unmatchedZapSignDocs.length > 0) {
         lines.push(
           `CONTRATOS ASSINADOS NO ZAPSIGN QUE NÃO CONSTAM NA PLANILHA (${extras.unmatchedZapSignDocs.length}):`
         );
@@ -152,7 +169,7 @@ export function buildPortfolioContextSummary(
           );
         }
       } else {
-        lines.push('- Auditoria ZapSign × Planilha: todos os documentos assinados possuem correspondência na planilha.');
+        lines.push('- Auditoria ZapSign × Planilha × Drive: todos os documentos assinados ativos possuem correspondência na planilha (itens em ZZ - Encerrados marcados como Encerrado (não cobrar)).');
       }
     }
   }

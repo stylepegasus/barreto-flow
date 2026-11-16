@@ -21,6 +21,7 @@ import {
 
 interface IndexedDriveMatch {
   etapa: DriveStage;
+  rawEtapa: string;
   nomePasta: string;
   urlPasta: string;
   normalizedPasta: string;
@@ -216,8 +217,10 @@ export function mapAppsScriptPayload(
               atualizadoEm: f.atualizadoEm ? String(f.atualizadoEm).trim() : undefined,
             }))
         : [];
+      const rawEtapa = String(d.etapa ?? '').trim() || DRIVE_STAGES[0];
       return {
         etapa: resolveStage(d.etapa),
+        rawEtapa,
         nomePasta: String(d.nomePasta ?? '').trim(),
         urlPasta:
           String(d.urlPasta ?? '').trim() ||
@@ -226,6 +229,15 @@ export function mapAppsScriptPayload(
         arquivos,
       };
     });
+
+  const normalizedDriveEtapas: AppsScriptDriveEtapaRow[] = indexedDrive.map(
+    (d) => ({
+      etapa: d.rawEtapa,
+      nomePasta: d.nomePasta,
+      urlPasta: d.urlPasta,
+      arquivos: d.arquivos,
+    })
+  );
 
   // Group installments by clientId and normalized client name
   const parcelasByClientId = new Map<string, AppsScriptInstallmentRow[]>();
@@ -377,6 +389,7 @@ export function mapAppsScriptPayload(
           ? `Direito de Família · CPF ${String(c.cpf).trim()}`
           : 'Direito de Família'),
       driveStage,
+      rawDriveStage: driveMatch?.rawEtapa,
       driveFolderUrl,
       driveFiles: driveMatch?.arquivos ?? [],
       modality,
@@ -445,6 +458,7 @@ export function mapAppsScriptPayload(
   return {
     clients,
     calendarEvents: rawEventosAgenda,
+    driveEtapas: normalizedDriveEtapas,
     summary: {
       syncedAt: new Date().toISOString(),
       clientesCount: clients.length,

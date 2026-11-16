@@ -1,9 +1,11 @@
 import 'dotenv/config';
 import express from 'express';
+import fs from 'node:fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { GoogleGenAI } from '@google/genai';
 import type { Content, Part } from '@google/genai';
+import { verifyFirebaseIdTokenAndAllowlist } from './src/utils/serverAuth';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -11,6 +13,38 @@ const __dirname = path.dirname(__filename);
 const PORT = Number(process.env.PORT) || 3000;
 const PRIMARY_MODEL = 'gemini-4-hydrogen';
 const FALLBACK_MODEL = 'gemini-3.1-flash-lite';
+
+function loadFirebaseProjectId(): string {
+  try {
+    const raw = fs.readFileSync(
+      path.resolve(__dirname, 'firebase-applet-config.json'),
+      'utf8'
+    );
+    const parsed = JSON.parse(raw) as { projectId?: string };
+    if (parsed.projectId) return parsed.projectId;
+  } catch {
+    // fallback below
+  }
+  return process.env.FIREBASE_PROJECT_ID || 'gen-lang-client-0925403191';
+}
+
+const FIREBASE_PROJECT_ID = loadFirebaseProjectId();
+
+async function requireAuthorizedUser(
+  req: express.Request,
+  res: express.Response,
+  next: express.NextFunction
+) {
+  const result = await verifyFirebaseIdTokenAndAllowlist(
+    req.headers.authorization,
+    { projectId: FIREBASE_PROJECT_ID }
+  );
+  if (!result.ok) {
+    res.status(result.status).json({ error: result.error });
+    return;
+  }
+  next();
+}
 
 function isTransientUnavailableError(err: unknown): boolean {
   const msg = err instanceof Error ? err.message : String(err ?? '');
@@ -181,7 +215,7 @@ async function startServer() {
   const app = express();
   app.use(express.json({ limit: '30mb' }));
 
-  app.post('/api/assistant/chat', async (req, res) => {
+  app.post('/api/assistant/chat', requireAuthorizedUser, async (req, res) => {
     try {
       const body = (req.body ?? {}) as AssistantChatRequestBody;
       const message = String(body.message ?? '').trim();
@@ -238,7 +272,7 @@ async function startServer() {
     }
   });
 
-  app.get('/api/zapsign/signed', async (_req, res) => {
+  app.get('/api/zapsign/signed', requireAuthorizedUser, async (_req, res) => {
     const token = process.env.ZAPSIGN_API_TOKEN?.trim();
     if (!token || token === 'MY_ZAPSIGN_API_TOKEN') {
       res.json({

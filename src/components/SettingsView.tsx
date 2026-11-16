@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   CheckCircle2,
   FolderOpen,
@@ -64,6 +64,10 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   );
   const [urlError, setUrlError] = useState<string | null>(null);
   const [copiedReport, setCopiedReport] = useState(false);
+
+  useEffect(() => {
+    setAppsScriptInput(config.appsScriptUrl);
+  }, [config.appsScriptUrl]);
 
   const handleAppsScriptSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
