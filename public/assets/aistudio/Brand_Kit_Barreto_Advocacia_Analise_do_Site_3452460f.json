@@ -1,0 +1,93 @@
+{
+  "nome": "Barreto Advocacia — Brand Kit com base no site",
+  "data_analise": "2026-10-14",
+  "site": "https://www.advocaciabarreto.com/",
+  "logo": {
+    "elementos_observados": [
+      "monograma B dourado serifado",
+      "moldura retangular dourada"
+    ],
+    "ativo_publico": "https://www.advocaciabarreto.com/assets/branding/logo/logo-barreto.png",
+    "base_extracao_de_cores": "favicon JPEG fornecido pelo usuário"
+  },
+  "paleta_referencia": [
+    {
+      "nome": "Dourado institucional",
+      "hex": "#DCB14A",
+      "classe": "observado no favicon (aproximado)"
+    },
+    {
+      "nome": "Dourado luminoso",
+      "hex": "#FFD559",
+      "classe": "observado no favicon (aproximado)"
+    },
+    {
+      "nome": "Grafite institucional",
+      "hex": "#313131",
+      "classe": "observado no favicon (aproximado)"
+    },
+    {
+      "nome": "Marfim editorial",
+      "hex": "#F6F3EC",
+      "classe": "proposto como complementar"
+    },
+    {
+      "nome": "Branco",
+      "hex": "#FFFFFF",
+      "classe": "proposto como complementar"
+    }
+  ],
+  "tipografia_sugerida": {
+    "titulos": "EB Garamond",
+    "textos": "Lato",
+    "status": "sugestão; não foi confirmada no código do site"
+  },
+  "atributos_de_marca": [
+    "autoridade técnica",
+    "transparência",
+    "agilidade responsável",
+    "estratégia",
+    "acolhimento"
+  ],
+  "frase_identificada": "Compromisso com o Direito. Excelência no Resultado.",
+  "diagnostico": [
+    {
+      "prioridade": "ALTA",
+      "titulo": "Alinhamento das áreas",
+      "analise": "O destaque inicial cita Trabalhista; a seção “Áreas de Atuação” apresenta Criminal, Cível, Família e Empresarial. Unificar o portfólio nas duas áreas."
+    },
+    {
+      "prioridade": "ALTA",
+      "titulo": "Revisão de publicidade jurídica",
+      "analise": "Expressões de resultado e depoimento que menciona vitória em causa merecem revisão à luz das normas da OAB. Priorizar afirmações descritivas, não promocionais."
+    },
+    {
+      "prioridade": "MÉDIA",
+      "titulo": "Alegações verificáveis",
+      "analise": "“10 anos”, “1.180+ casos”, “190+ negócios” e “50+ prêmios” devem ter base documental, critério e atualização definidos, antes de replicação."
+    },
+    {
+      "prioridade": "MÉDIA",
+      "titulo": "Promessas operacionais",
+      "analise": "A expressão de resposta em até 30 minutos e referências absolutas de sigilo devem corresponder a práticas e limites efetivamente sustentáveis."
+    },
+    {
+      "prioridade": "MÉDIA",
+      "titulo": "Unidade de tom",
+      "analise": "Conciliar o discurso de excelência com a promessa de atendimento acessível, evitando linguagem comercial excessivamente persuasiva."
+    }
+  ],
+  "aplicacoes_recomendadas": [
+    "feed 4:5",
+    "stories 9:16",
+    "capas de reels",
+    "papelaria",
+    "documentos institucionais"
+  ],
+  "fontes": [
+    "https://www.advocaciabarreto.com/",
+    "https://www.advocaciabarreto.com/assets/branding/logo/logo-barreto.png",
+    "https://www.oab.org.br/leisnormas/legislacao/provimentos/205-2021"
+  ],
+  "limitacoes": "Site foi acessado por índice textual e recurso de imagem; CSS e fontes não foram auditados. Paleta estimada a partir de JPEG e tipografia sugerida, não oficial."
+}
