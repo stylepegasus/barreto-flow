@@ -5,7 +5,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { GoogleGenAI } from '@google/genai';
 import type { Content, Part } from '@google/genai';
-import { verifyFirebaseIdTokenAndAllowlist } from './src/utils/serverAuth';
+import { verifyFirebaseIdTokenAndAllowlist } from './src/utils/serverAuth.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -215,6 +215,10 @@ async function startServer() {
   const app = express();
   app.use(express.json({ limit: '30mb' }));
 
+  app.get('/api/health', (_req, res) => {
+    res.status(200).json({ ok: true });
+  });
+
   app.post('/api/assistant/chat', requireAuthorizedUser, async (req, res) => {
     try {
       const body = (req.body ?? {}) as AssistantChatRequestBody;
@@ -418,7 +422,13 @@ async function startServer() {
     }
   });
 
-  if (process.env.NODE_ENV !== 'production') {
+  const distDir = path.resolve(__dirname, 'dist');
+  const distIndexPath = path.join(distDir, 'index.html');
+  const isProduction =
+    process.env.NODE_ENV === 'production' ||
+    (process.env.NODE_ENV !== 'development' && fs.existsSync(distIndexPath));
+
+  if (!isProduction) {
     const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
       server: { middlewareMode: true },
@@ -426,10 +436,9 @@ async function startServer() {
     });
     app.use(vite.middlewares);
   } else {
-    const distDir = path.resolve(__dirname, 'dist');
     app.use(express.static(distDir));
-    app.get('/{*splat}', (_req, res) => {
-      res.sendFile(path.join(distDir, 'index.html'));
+    app.get('*', (_req, res) => {
+      res.sendFile(distIndexPath);
     });
   }
 

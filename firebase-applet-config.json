@@ -3,6 +3,7 @@
   "appId": "1:137290765564:web:da02edeb05dff549a83379",
   "apiKey": "AIzaSyBd_f_dNXXTkd5VSk2OH2mb0YWOWDeNYk4",
   "authDomain": "gen-lang-client-0925403191.firebaseapp.com",
+  "firestoreDatabaseId": "ai-studio-barretoadvocacia-3e8721fb-da1c-4be3-8558-712b29e5cfe7",
   "storageBucket": "gen-lang-client-0925403191.firebasestorage.app",
   "messagingSenderId": "137290765564",
   "measurementId": "",

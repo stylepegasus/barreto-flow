@@ -1,5 +1,5 @@
 import crypto from 'node:crypto';
-import { isAuthorizedEmail, normalizeEmail } from './authAllowlist';
+import { isAuthorizedEmail, normalizeEmail } from './authAllowlist.ts';
 
 const GOOGLE_CERTS_URL =
   'https://www.googleapis.com/robot/v1/metadata/x509/securetoken@system.gserviceaccount.com';
