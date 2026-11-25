@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import {
   AlertCircle,
+  AlertTriangle,
   BadgeCheck,
   CalendarClock,
   CalendarDays,
@@ -12,6 +13,8 @@ import {
   FolderOpen,
   MessageCircle,
   Receipt,
+  RefreshCw,
+  ShieldAlert,
   TrendingUp,
   UserPlus,
   Wallet,
@@ -22,6 +25,10 @@ import {
   ZapSignCrossReferenceItem,
   ZapSignSignedDoc,
 } from '../types/honorarios';
+import type {
+  PortfolioHealthReport,
+  RowParseIssue,
+} from '../utils/appsScriptMapper';
 import {
   calculateDashboardKPIs,
   calculateMonthlyChartData,
@@ -43,6 +50,11 @@ interface DashboardViewProps {
   unmatchedZapSignItems?: ZapSignCrossReferenceItem[];
   proceduralZapSignCount?: number;
   zapSignSignedCount?: number;
+  healthReport?: PortfolioHealthReport | null;
+  parseIssues?: RowParseIssue[];
+  isSyncing?: boolean;
+  isRevalidatingSWR?: boolean;
+  onRefreshPortfolio?: () => void;
   onMarkPaid: (item: InstallmentWithStatus) => void;
   onOpenWhatsApp: (item: InstallmentWithStatus) => void;
   onNavigateTab: (tab: 'calendario' | 'clientes' | 'metas') => void;
@@ -113,6 +125,11 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
   unmatchedZapSignDocs = [],
   unmatchedZapSignItems,
   proceduralZapSignCount = 0,
+  healthReport,
+  parseIssues = [],
+  isSyncing = false,
+  isRevalidatingSWR = false,
+  onRefreshPortfolio,
   onMarkPaid,
   onOpenWhatsApp,
   onNavigateTab,
@@ -130,6 +147,16 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
   const [hoveredTooltipId, setHoveredTooltipId] = useState<string | null>(null);
   const [pinnedTooltipId, setPinnedTooltipId] = useState<string | null>(null);
   const [zapSignExpanded, setZapSignExpanded] = useState(false);
+  const [integrityExpanded, setIntegrityExpanded] = useState(false);
+
+  const effectiveParseIssues =
+    parseIssues.length > 0 ? parseIssues : (healthReport?.parseIssues ?? []);
+  const missingDriveCount = healthReport?.missingDriveCount ?? 0;
+  const missingCalendarEventsCount =
+    healthReport?.missingCalendarEventsCount ?? 0;
+  const clientsWithWarningsCount = healthReport?.clientsWithWarningsCount ?? 0;
+  const hasIntegrityAlerts =
+    effectiveParseIssues.length > 0 || clientsWithWarningsCount > 0;
 
   const auditItems: ZapSignCrossReferenceItem[] = useMemo(() => {
     if (unmatchedZapSignItems) return unmatchedZapSignItems;
@@ -237,6 +264,33 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
           <p className="text-xs font-medium text-[#313131]/65 tabular-nums whitespace-nowrap">
             Referência: {formatDateBR(todayISO)}
           </p>
+          {onRefreshPortfolio && (
+            <button
+              type="button"
+              onClick={onRefreshPortfolio}
+              disabled={isSyncing}
+              data-testid="dashboard-refresh-portfolio-btn"
+              title={
+                isRevalidatingSWR
+                  ? 'Revalidando carteira em segundo plano...'
+                  : 'Atualizar carteira (Planilha SSOT, Drive e Calendar)'
+              }
+              className="inline-flex items-center gap-1.5 rounded-lg border border-[#313131]/20 bg-white px-3 py-1.5 text-xs font-medium text-[#313131] hover:border-[#DCB14A] hover:bg-[#F6F3EC] disabled:opacity-55 whitespace-nowrap"
+            >
+              <RefreshCw
+                className={`h-3.5 w-3.5 text-[#8D6A14] ${
+                  isSyncing || isRevalidatingSWR ? 'animate-spin' : ''
+                }`}
+              />
+              <span>
+                {isSyncing
+                  ? 'Atualizando...'
+                  : isRevalidatingSWR
+                    ? 'Sincronizando...'
+                    : 'Atualizar'}
+              </span>
+            </button>
+          )}
         </div>
       </div>
 
@@ -380,6 +434,137 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                 );
               })}
             </ul>
+          )}
+        </div>
+      )}
+
+      {/* Discrete Integrity & Parse Issues Notice (Sheets SSOT × Drive × Calendar) */}
+      {hasIntegrityAlerts && (
+        <div
+          role="status"
+          data-testid="dashboard-integrity-banner"
+          className="rounded-xl border border-[#313131]/18 bg-white px-4 py-3 text-xs text-[#313131] space-y-3"
+        >
+          <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+            <div className="flex items-start gap-2.5">
+              <ShieldAlert className="mt-0.5 h-4 w-4 shrink-0 text-[#8D6A14]" />
+              <span>
+                <strong className="font-semibold">
+                  Auditoria de integridade (Planilha SSOT):
+                </strong>{' '}
+                {[
+                  effectiveParseIssues.length > 0
+                    ? `${effectiveParseIssues.length} ${
+                        effectiveParseIssues.length === 1
+                          ? 'célula com erro de data/valor isolada'
+                          : 'células com erro de data/valor isoladas'
+                      }`
+                    : null,
+                  missingDriveCount > 0
+                    ? `${missingDriveCount} ${
+                        missingDriveCount === 1
+                          ? 'cliente sem pasta válida no Drive'
+                          : 'clientes sem pasta válida no Drive'
+                      }`
+                    : null,
+                  missingCalendarEventsCount > 0
+                    ? `${missingCalendarEventsCount} ${
+                        missingCalendarEventsCount === 1
+                          ? 'parcela pendente sem evento no Calendar'
+                          : 'parcelas pendentes sem evento no Calendar'
+                      }`
+                    : null,
+                ]
+                  .filter(Boolean)
+                  .join(' · ')}
+                .
+              </span>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-3 shrink-0">
+              <button
+                type="button"
+                onClick={() => setIntegrityExpanded((prev) => !prev)}
+                aria-expanded={integrityExpanded}
+                data-testid="dashboard-integrity-toggle-btn"
+                className="inline-flex items-center gap-1 rounded-md border border-[#313131]/20 bg-[#F6F3EC] px-2.5 py-1 text-[11px] font-medium text-[#313131] hover:border-[#DCB14A] hover:bg-white whitespace-nowrap"
+              >
+                <span>
+                  {integrityExpanded ? 'Ocultar detalhes' : 'Ver detalhes'}
+                </span>
+                {integrityExpanded ? (
+                  <ChevronUp className="h-3 w-3 text-[#8D6A14]" />
+                ) : (
+                  <ChevronDown className="h-3 w-3 text-[#8D6A14]" />
+                )}
+              </button>
+              <button
+                type="button"
+                onClick={() => onNavigateTab('clientes')}
+                className="text-left sm:text-right font-semibold text-[#8D6A14] underline underline-offset-4 hover:text-[#313131] whitespace-nowrap shrink-0"
+              >
+                Revisar em Clientes
+              </button>
+            </div>
+          </div>
+
+          {integrityExpanded && (
+            <div className="space-y-3 border-t border-[#313131]/10 pt-3">
+              {effectiveParseIssues.length > 0 && (
+                <div>
+                  <p className="mb-1.5 flex items-center gap-1.5 text-[11px] font-semibold text-[#313131]">
+                    <AlertTriangle className="h-3.5 w-3.5 text-amber-700" />
+                    Células da planilha isoladas sem afetar os totais da carteira (
+                    {effectiveParseIssues.length})
+                  </p>
+                  <ul className="max-h-48 overflow-y-auto divide-y divide-[#313131]/10 rounded-lg border border-[#313131]/10 bg-[#F6F3EC]/60">
+                    {effectiveParseIssues.slice(0, 25).map((issue, idx) => (
+                      <li
+                        key={`${issue.rowId}-${issue.field}-${idx}`}
+                        className="flex flex-col gap-1 px-3 py-2 text-[11px] sm:flex-row sm:items-center sm:justify-between"
+                      >
+                        <span className="font-medium text-[#313131]">
+                          {issue.clientName}{' '}
+                          <span className="font-normal text-[#313131]/60">
+                            ({issue.scope} · campo "{issue.field}")
+                          </span>
+                        </span>
+                        <span className="text-[#313131]/75 tabular-nums">
+                          Valor "{issue.rawValue || 'vazio'}" — {issue.reason}
+                        </span>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+
+              {healthReport && clientsWithWarningsCount > 0 && (
+                <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-[#313131]/10 bg-[#F6F3EC]/60 px-3 py-2 text-[11px] text-[#313131]/80">
+                  <span>
+                    Triangulação ativa em{' '}
+                    <strong className="font-semibold text-[#313131]">
+                      {healthReport.totalClients}
+                    </strong>{' '}
+                    clientes:{' '}
+                    <strong className="font-semibold text-emerald-800">
+                      {healthReport.healthyClientsCount} íntegro(s)
+                    </strong>{' '}
+                    e{' '}
+                    <strong className="font-semibold text-amber-900">
+                      {clientsWithWarningsCount} com alerta operacional
+                    </strong>
+                    .
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => onNavigateTab('clientes')}
+                    className="font-semibold text-[#8D6A14] hover:underline"
+                  >
+                    Ver badges por cliente
+                  </button>
+                </div>
+              )}
+            </div>
           )}
         </div>
       )}

@@ -1,23 +1,90 @@
 import {
-  AppsScriptCalendarEventRow,
-  AppsScriptClientRow,
-  AppsScriptDriveEtapaRow,
-  AppsScriptInstallmentRow,
-  AppsScriptPayload,
-  AppsScriptSyncResult,
-  ClientCase,
   DRIVE_STAGES,
-  DriveFileItem,
-  DriveStage,
-  Installment,
-} from '../types/honorarios';
+  type AppsScriptCalendarEventRow,
+  type AppsScriptClientRow,
+  type AppsScriptDriveEtapaRow,
+  type AppsScriptInstallmentRow,
+  type AppsScriptPayload,
+  type AppsScriptSyncResult,
+  type ClientCase,
+  type DriveFileItem,
+  type DriveStage,
+  type Installment,
+} from '../types/honorarios.ts';
 import {
+  isValidDriveFolderUrl,
   normalizeText,
-  parseBRLAmount,
-  parseFlexibleDateISO,
+  parseBRLAmountStrict,
+  parseFlexibleDateStrict,
   resolveModality,
   resolveStage,
-} from './sheetArchitecture';
+} from './sheetArchitecture.ts';
+
+export type SyncWarningCode =
+  | 'CORRUPTED_SHEET_ROW'
+  | 'MISSING_DRIVE_FOLDER'
+  | 'INVALID_DRIVE_URL'
+  | 'MISSING_CALENDAR_EVENT'
+  | 'ORPHAN_CALENDAR_EVENT';
+
+export interface RowParseIssue {
+  scope: 'cliente' | 'parcela';
+  rowId: string;
+  clientId: string;
+  clientName: string;
+  field: string;
+  rawValue: string;
+  reason: string;
+}
+
+export interface ClientSyncWarning {
+  code: SyncWarningCode;
+  severity: 'warning' | 'info';
+  source: 'sheets' | 'drive' | 'calendar';
+  message: string;
+  installmentId?: string;
+  dueDate?: string;
+  field?: string;
+}
+
+export interface ClientTriangulationHealth {
+  clientId: string;
+  clientName: string;
+  healthy: boolean;
+  driveOk: boolean;
+  driveUrlValid: boolean;
+  calendarOk: boolean;
+  pendingInstallmentsCount: number;
+  pendingWithCalendarCount: number;
+  missingCalendarDueDates: string[];
+  corruptedRowCount: number;
+  warnings: ClientSyncWarning[];
+}
+
+export interface PortfolioHealthReport {
+  checkedAt: string;
+  ssotAuthority: 'Google Sheets';
+  totalClients: number;
+  healthyClientsCount: number;
+  clientsWithWarningsCount: number;
+  missingDriveCount: number;
+  missingCalendarEventsCount: number;
+  corruptedRowsCount: number;
+  parseIssues: RowParseIssue[];
+  warningsByClientId: Record<string, ClientSyncWarning[]>;
+  healthByClientId: Record<string, ClientTriangulationHealth>;
+}
+
+export type EnrichedClientCase = ClientCase & {
+  syncWarnings?: ClientSyncWarning[];
+  healthCheck?: ClientTriangulationHealth;
+};
+
+export type EnrichedAppsScriptSyncResult = Omit<AppsScriptSyncResult, 'clients'> & {
+  clients: EnrichedClientCase[];
+  parseIssues: RowParseIssue[];
+  healthReport: PortfolioHealthReport;
+};
 
 interface IndexedDriveMatch {
   etapa: DriveStage;
@@ -31,8 +98,12 @@ interface IndexedDriveMatch {
 function stripFolderDecorators(folderName: string): string {
   return normalizeText(
     folderName
-      .replace(/^\d+\s*[-–._]\s*/, '')
-      .replace(/\s*[-–]\s*(divorcio|pensao|guarda|alimentos|inventario|familia).*$/i, '')
+      .replace(/^(?:[a-z]{1,5}\s*[-–_.]?\s*\d{1,5}|\d{1,5})\s*[-–—._|:]\s*/i, '')
+      .replace(/\s*\([^)]*\)\s*/g, ' ')
+      .replace(
+        /\s*[-–—_|/]\s*(div[oó]rcio|pens[aã]o|guarda|alimentos|invent[aá]rio|fam[ií]lia|curatela|interdi[çc][aã]o).*$/i,
+        ''
+      )
   );
 }
 
@@ -107,7 +178,10 @@ function parseParcelNumberPair(
 
 function isInstallmentPaid(
   row: AppsScriptInstallmentRow,
-  expectedAmount: number
+  expectedAmount: number,
+  recebidoAmount: number,
+  faltaAmount: number,
+  hasExplicitFalta: boolean
 ): boolean {
   const normSit = normalizeText(String(row.situacao ?? ''));
   const explicitNotPaid =
@@ -126,18 +200,40 @@ function isInstallmentPaid(
     return true;
   }
 
-  const recebido = parseBRLAmount(row.recebido);
-  const falta = parseBRLAmount(row.faltaReceber);
-  const hasExplicitFalta =
-    row.faltaReceber !== undefined &&
-    row.faltaReceber !== null &&
-    String(row.faltaReceber).trim() !== '';
-
-  if (recebido > 0 && hasExplicitFalta && falta <= 0.01) {
+  if (recebidoAmount > 0 && hasExplicitFalta && faltaAmount <= 0.01) {
     return true;
   }
-  if (recebido > 0 && expectedAmount > 0 && recebido >= expectedAmount - 0.01) {
+  if (
+    recebidoAmount > 0 &&
+    expectedAmount > 0 &&
+    recebidoAmount >= expectedAmount - 0.01
+  ) {
     return true;
+  }
+  return false;
+}
+
+function eventMatchesClient(
+  ev: AppsScriptCalendarEventRow,
+  normClient: string,
+  firstToken: string,
+  cleanCpfDigits?: string
+): boolean {
+  const haystackRaw = `${ev.titulo ?? ''} ${ev.descricao ?? ''}`;
+  const haystack = normalizeText(haystackRaw);
+  if (!haystack) return false;
+  if (cleanCpfDigits && haystackRaw.replace(/\D/g, '').includes(cleanCpfDigits)) {
+    return true;
+  }
+  if (haystack.includes(normClient)) return true;
+  if (firstToken.length >= 4 && haystack.includes(firstToken)) {
+    const clientTokens = normClient.split(' ').filter((t) => t.length >= 3);
+    if (clientTokens.length <= 1) return true;
+    const lastToken = clientTokens[clientTokens.length - 1];
+    // Require either last name match or clear billing prefix with first token
+    if (haystack.includes(lastToken) || haystack.includes('cobranca')) {
+      return true;
+    }
   }
   return false;
 }
@@ -145,29 +241,186 @@ function isInstallmentPaid(
 function findMatchingCalendarEventId(
   clientName: string,
   dueDateISO: string,
-  events: AppsScriptCalendarEventRow[]
+  events: AppsScriptCalendarEventRow[],
+  clientCpf?: string
 ): string | undefined {
   const normClient = normalizeText(clientName);
   const firstToken = normClient.split(' ')[0] ?? '';
-  if (!normClient || events.length === 0) return undefined;
+  const cpfDigits = String(clientCpf ?? '').replace(/\D/g, '');
+  const cleanCpfDigits = cpfDigits.length === 11 ? cpfDigits : undefined;
+
+  if (!normClient || !Array.isArray(events) || events.length === 0) {
+    return undefined;
+  }
 
   const matched = events.find((ev) => {
-    const eventDate = parseFlexibleDateISO(ev.inicio);
-    if (eventDate !== dueDateISO) return false;
-    const haystack = normalizeText(`${ev.titulo ?? ''} ${ev.descricao ?? ''}`);
-    return (
-      haystack.includes(normClient) ||
-      (firstToken.length >= 4 && haystack.includes(firstToken))
-    );
+    const parsedDate = parseFlexibleDateStrict(ev?.inicio);
+    if (!parsedDate.ok || parsedDate.iso !== dueDateISO) return false;
+    return eventMatchesClient(ev, normClient, firstToken, cleanCpfDigits);
   });
 
   return matched?.id ? String(matched.id) : undefined;
 }
 
+/**
+ * Triangulates state across the 3 sources (Google Sheets SSOT -> Drive -> Calendar)
+ * and produces non-blocking per-client health checks & warnings.
+ */
+export function runPortfolioHealthCheck(
+  clients: ClientCase[],
+  driveEtapas: AppsScriptDriveEtapaRow[] = [],
+  calendarEvents: AppsScriptCalendarEventRow[] = [],
+  parseIssues: RowParseIssue[] = []
+): PortfolioHealthReport {
+  const safeClients = Array.isArray(clients) ? clients : [];
+  const safeDrive = Array.isArray(driveEtapas) ? driveEtapas : [];
+  const safeCalendar = Array.isArray(calendarEvents) ? calendarEvents : [];
+  const safeIssues = Array.isArray(parseIssues) ? parseIssues : [];
+
+  const driveUrlsSet = new Set(
+    safeDrive
+      .map((d) => String(d?.urlPasta ?? '').trim())
+      .filter((u) => isValidDriveFolderUrl(u))
+  );
+
+  const issuesByClientId = new Map<string, RowParseIssue[]>();
+  for (const issue of safeIssues) {
+    const list = issuesByClientId.get(issue.clientId) ?? [];
+    list.push(issue);
+    issuesByClientId.set(issue.clientId, list);
+  }
+
+  const warningsByClientId: Record<string, ClientSyncWarning[]> = {};
+  const healthByClientId: Record<string, ClientTriangulationHealth> = {};
+
+  let healthyClientsCount = 0;
+  let clientsWithWarningsCount = 0;
+  let missingDriveCount = 0;
+  let missingCalendarEventsCount = 0;
+
+  for (const client of safeClients) {
+    const warnings: ClientSyncWarning[] = [];
+    const clientIssues = issuesByClientId.get(client.id) ?? [];
+
+    // 1. Surface isolated sheet parsing errors for this client
+    for (const issue of clientIssues) {
+      warnings.push({
+        code: 'CORRUPTED_SHEET_ROW',
+        severity: 'warning',
+        source: 'sheets',
+        field: issue.field,
+        message: `Célula corrompida isolada (${issue.field}="${issue.rawValue}"): ${issue.reason}`,
+      });
+    }
+
+    // 2. Drive check: verify folder URL exists and is a valid Drive folder URL
+    const rawUrl = String(client.driveFolderUrl ?? '').trim();
+    const driveUrlValid = isValidDriveFolderUrl(rawUrl);
+    const hasGenericFallback =
+      !rawUrl || rawUrl.endsWith('/my-drive') || rawUrl.endsWith('/my-drive/');
+
+    if (hasGenericFallback) {
+      missingDriveCount += 1;
+      warnings.push({
+        code: 'MISSING_DRIVE_FOLDER',
+        severity: 'warning',
+        source: 'drive',
+        message: `Pasta do cliente "${client.fullName}" não localizada no Google Drive.`,
+      });
+    } else if (!driveUrlValid) {
+      missingDriveCount += 1;
+      warnings.push({
+        code: 'INVALID_DRIVE_URL',
+        severity: 'warning',
+        source: 'drive',
+        message: `URL da pasta no Google Drive inválida ou inacessível ("${rawUrl}").`,
+      });
+    } else if (safeDrive.length > 0 && !driveUrlsSet.has(rawUrl)) {
+      warnings.push({
+        code: 'INVALID_DRIVE_URL',
+        severity: 'info',
+        source: 'drive',
+        message: `URL da pasta do Drive não consta no índice atual de etapas do Drive.`,
+      });
+    }
+
+    // 3. Calendar check: verify active billing events cover all unpaid/pending installments
+    const pendingInstallments = client.installments.filter((i) => !i.paidDate);
+    let pendingWithCalendarCount = 0;
+    const missingCalendarDueDates: string[] = [];
+
+    for (const inst of pendingInstallments) {
+      const matchedEventId =
+        inst.calendarEventId ||
+        findMatchingCalendarEventId(
+          client.fullName,
+          inst.dueDate,
+          safeCalendar,
+          client.cpf
+        );
+      if (matchedEventId) {
+        pendingWithCalendarCount += 1;
+      } else {
+        missingCalendarEventsCount += 1;
+        missingCalendarDueDates.push(inst.dueDate);
+        warnings.push({
+          code: 'MISSING_CALENDAR_EVENT',
+          severity: 'warning',
+          source: 'calendar',
+          installmentId: inst.id,
+          dueDate: inst.dueDate,
+          message: `Parcela ${inst.installmentNumber}/${inst.totalInstallments} (${inst.dueDate}) pendente na planilha sem evento correspondente no Google Calendar.`,
+        });
+      }
+    }
+
+    const driveOk = !hasGenericFallback && driveUrlValid;
+    const calendarOk = missingCalendarDueDates.length === 0;
+    const healthy = warnings.length === 0;
+
+    if (healthy) {
+      healthyClientsCount += 1;
+    } else {
+      clientsWithWarningsCount += 1;
+    }
+
+    const health: ClientTriangulationHealth = {
+      clientId: client.id,
+      clientName: client.fullName,
+      healthy,
+      driveOk,
+      driveUrlValid,
+      calendarOk,
+      pendingInstallmentsCount: pendingInstallments.length,
+      pendingWithCalendarCount,
+      missingCalendarDueDates,
+      corruptedRowCount: clientIssues.length,
+      warnings,
+    };
+
+    warningsByClientId[client.id] = warnings;
+    healthByClientId[client.id] = health;
+  }
+
+  return {
+    checkedAt: new Date().toISOString(),
+    ssotAuthority: 'Google Sheets',
+    totalClients: safeClients.length,
+    healthyClientsCount,
+    clientsWithWarningsCount,
+    missingDriveCount,
+    missingCalendarEventsCount,
+    corruptedRowsCount: safeIssues.length,
+    parseIssues: safeIssues,
+    warningsByClientId,
+    healthByClientId,
+  };
+}
+
 export function mapAppsScriptPayload(
   rawJson: unknown,
-  fallbackTodayISO: string = new Date().toISOString().slice(0, 10)
-): AppsScriptSyncResult {
+  _fallbackTodayISO: string = new Date().toISOString().slice(0, 10)
+): EnrichedAppsScriptSyncResult {
   if (!rawJson || typeof rawJson !== 'object') {
     throw new Error('Resposta inválida do Web App do Google Apps Script.');
   }
@@ -201,12 +454,19 @@ export function mapAppsScriptPayload(
     );
   }
 
+  const parseIssues: RowParseIssue[] = [];
+
   const indexedDrive: IndexedDriveMatch[] = rawDriveEtapas
-    .filter((d) => String(d.nomePasta ?? '').trim().length > 0)
+    .filter((d) => Boolean(d) && String(d.nomePasta ?? '').trim().length > 0)
     .map((d) => {
       const arquivos: DriveFileItem[] = Array.isArray(d.arquivos)
         ? d.arquivos
-            .filter((f) => String(f?.id ?? '').trim() && String(f?.nome ?? '').trim())
+            .filter(
+              (f) =>
+                Boolean(f) &&
+                String(f.id ?? '').trim() &&
+                String(f.nome ?? '').trim()
+            )
             .map((f) => ({
               id: String(f.id ?? '').trim(),
               nome: String(f.nome ?? '').trim(),
@@ -214,7 +474,9 @@ export function mapAppsScriptPayload(
               url:
                 String(f.url ?? '').trim() ||
                 `https://drive.google.com/file/d/${String(f.id ?? '').trim()}/view`,
-              atualizadoEm: f.atualizadoEm ? String(f.atualizadoEm).trim() : undefined,
+              atualizadoEm: f.atualizadoEm
+                ? String(f.atualizadoEm).trim()
+                : undefined,
             }))
         : [];
       const rawEtapa = String(d.etapa ?? '').trim() || DRIVE_STAGES[0];
@@ -239,11 +501,12 @@ export function mapAppsScriptPayload(
     })
   );
 
-  // Group installments by clientId and normalized client name
+  // Group installments by clientId and normalized client name (Sheets SSOT)
   const parcelasByClientId = new Map<string, AppsScriptInstallmentRow[]>();
   const parcelasByClientName = new Map<string, AppsScriptInstallmentRow[]>();
 
   for (const p of rawParcelas) {
+    if (!p || typeof p !== 'object') continue;
     const cid = String(p.idCliente ?? '').trim();
     const cname = normalizeText(String(p.cliente ?? ''));
     if (cid) {
@@ -266,65 +529,186 @@ export function mapAppsScriptPayload(
     index: number,
     matchedParcelas: AppsScriptInstallmentRow[]
   ): ClientCase => {
-    const id = String(c.id ?? `as-cli-${index + 1}`).trim();
+    const id = String(c.id ?? `as-cli-${index + 1}`).trim() || `as-cli-${index + 1}`;
     const fullName = String(c.nome ?? 'Cliente').trim() || `Cliente ${index + 1}`;
+    const rawCpf = String(c.cpf ?? '').trim();
     const driveMatch = findMatchingDriveEtapa(fullName, indexedDrive);
     if (driveMatch) {
       matchedDriveCount += 1;
     }
 
     const modality = resolveModality(c.modalidade);
-    const regularCount = Math.max(
-      0,
-      Math.round(parseBRLAmount(c.parcelasRegulares))
-    );
+    const regularCountParsed = parseBRLAmountStrict(c.parcelasRegulares);
+    if (!regularCountParsed.ok) {
+      parseIssues.push({
+        scope: 'cliente',
+        rowId: id,
+        clientId: id,
+        clientName: fullName,
+        field: 'parcelasRegulares',
+        rawValue: regularCountParsed.raw,
+        reason: regularCountParsed.error ?? 'Número de parcelas inválido',
+      });
+    }
+    const regularCount = Math.max(0, Math.round(regularCountParsed.value));
 
     const installments: Installment[] = matchedParcelas
       .map((p, pIdx): Installment | null => {
         consumedParcelas.add(p);
-        const previsto = parseBRLAmount(p.previsto);
-        const recebido = parseBRLAmount(p.recebido);
-        const falta = parseBRLAmount(p.faltaReceber);
-        const amount =
-          previsto > 0 ? previsto : recebido > 0 ? recebido : falta;
+        const rowId = String(p.idParcela ?? `${id}-p${pIdx + 1}`).trim();
+        try {
+          const previstoParsed = parseBRLAmountStrict(p.previsto);
+          const recebidoParsed = parseBRLAmountStrict(p.recebido);
+          const faltaParsed = parseBRLAmountStrict(p.faltaReceber);
 
-        const paid = isInstallmentPaid(p, amount);
-        const dueDate =
-          parseFlexibleDateISO(p.vencimento) ??
-          parseFlexibleDateISO(p.dataConfirmada) ??
-          (paid ? parseFlexibleDateISO(p.ultimoPagamento) : undefined);
+          if (!previstoParsed.ok) {
+            parseIssues.push({
+              scope: 'parcela',
+              rowId,
+              clientId: id,
+              clientName: fullName,
+              field: 'previsto',
+              rawValue: previstoParsed.raw,
+              reason: previstoParsed.error ?? 'Valor previsto inválido',
+            });
+          }
+          if (!recebidoParsed.ok) {
+            parseIssues.push({
+              scope: 'parcela',
+              rowId,
+              clientId: id,
+              clientName: fullName,
+              field: 'recebido',
+              rawValue: recebidoParsed.raw,
+              reason: recebidoParsed.error ?? 'Valor recebido inválido',
+            });
+          }
+          if (!faltaParsed.ok) {
+            parseIssues.push({
+              scope: 'parcela',
+              rowId,
+              clientId: id,
+              clientName: fullName,
+              field: 'faltaReceber',
+              rawValue: faltaParsed.raw,
+              reason: faltaParsed.error ?? 'Saldo restante inválido',
+            });
+          }
 
-        if (!dueDate || amount <= 0) {
+          const previsto = previstoParsed.ok && previstoParsed.value > 0 ? previstoParsed.value : 0;
+          const recebido = recebidoParsed.ok && recebidoParsed.value > 0 ? recebidoParsed.value : 0;
+          const falta = faltaParsed.ok && faltaParsed.value > 0 ? faltaParsed.value : 0;
+          const amount =
+            previsto > 0 ? previsto : recebido > 0 ? recebido : falta;
+
+          const hasExplicitFalta =
+            !faltaParsed.isEmpty && faltaParsed.ok;
+
+          const paid = isInstallmentPaid(
+            p,
+            amount,
+            recebido,
+            falta,
+            hasExplicitFalta
+          );
+
+          const vencimentoParsed = parseFlexibleDateStrict(p.vencimento);
+          const dataConfirmadaParsed = parseFlexibleDateStrict(p.dataConfirmada);
+          const ultimoPagamentoParsed = parseFlexibleDateStrict(p.ultimoPagamento);
+
+          if (!vencimentoParsed.ok && !vencimentoParsed.isEmpty) {
+            parseIssues.push({
+              scope: 'parcela',
+              rowId,
+              clientId: id,
+              clientName: fullName,
+              field: 'vencimento',
+              rawValue: vencimentoParsed.raw,
+              reason: vencimentoParsed.error ?? 'Data de vencimento inválida',
+            });
+          }
+          if (!dataConfirmadaParsed.ok && !dataConfirmadaParsed.isEmpty) {
+            parseIssues.push({
+              scope: 'parcela',
+              rowId,
+              clientId: id,
+              clientName: fullName,
+              field: 'dataConfirmada',
+              rawValue: dataConfirmadaParsed.raw,
+              reason: dataConfirmadaParsed.error ?? 'Data confirmada inválida',
+            });
+          }
+          if (!ultimoPagamentoParsed.ok && !ultimoPagamentoParsed.isEmpty) {
+            parseIssues.push({
+              scope: 'parcela',
+              rowId,
+              clientId: id,
+              clientName: fullName,
+              field: 'ultimoPagamento',
+              rawValue: ultimoPagamentoParsed.raw,
+              reason: ultimoPagamentoParsed.error ?? 'Data de pagamento inválida',
+            });
+          }
+
+          const dueDate =
+            (vencimentoParsed.ok ? vencimentoParsed.iso : undefined) ??
+            (dataConfirmadaParsed.ok ? dataConfirmadaParsed.iso : undefined) ??
+            (paid && ultimoPagamentoParsed.ok
+              ? ultimoPagamentoParsed.iso
+              : undefined);
+
+          // Fault isolation: skip corrupted/undated/zero installments without poisoning portfolio totals
+          if (!dueDate || !Number.isFinite(amount) || amount <= 0) {
+            return null;
+          }
+
+          const paidDate = paid
+            ? (ultimoPagamentoParsed.ok
+                ? ultimoPagamentoParsed.iso
+                : undefined) ??
+              (dataConfirmadaParsed.ok
+                ? dataConfirmadaParsed.iso
+                : undefined) ??
+              dueDate
+            : undefined;
+
+          const pair = parseParcelNumberPair(
+            p.parcela,
+            pIdx + 1,
+            Math.max(regularCount, matchedParcelas.length)
+          );
+
+          return {
+            id: rowId,
+            clientId: id,
+            clientName: fullName,
+            installmentNumber: pair.number,
+            totalInstallments: pair.total,
+            amount,
+            dueDate,
+            paidDate,
+            calendarEventId: findMatchingCalendarEventId(
+              fullName,
+              dueDate,
+              rawEventosAgenda,
+              rawCpf
+            ),
+          };
+        } catch (err: unknown) {
+          parseIssues.push({
+            scope: 'parcela',
+            rowId,
+            clientId: id,
+            clientName: fullName,
+            field: 'row',
+            rawValue: JSON.stringify(p ?? {}),
+            reason:
+              err instanceof Error
+                ? err.message
+                : 'Erro inesperado ao processar linha de parcela',
+          });
           return null;
         }
-
-        const paidDate = paid
-          ? parseFlexibleDateISO(p.ultimoPagamento) ??
-            parseFlexibleDateISO(p.dataConfirmada) ??
-            dueDate
-          : undefined;
-
-        const pair = parseParcelNumberPair(
-          p.parcela,
-          pIdx + 1,
-          Math.max(regularCount, matchedParcelas.length)
-        );
-
-        return {
-          id: String(p.idParcela ?? `${id}-p${pIdx + 1}`),
-          clientId: id,
-          clientName: fullName,
-          installmentNumber: pair.number,
-          totalInstallments: pair.total,
-          amount,
-          dueDate,
-          paidDate,
-          calendarEventId: findMatchingCalendarEventId(
-            fullName,
-            dueDate,
-            rawEventosAgenda
-          ),
-        };
       })
       .filter((inst): inst is Installment => inst !== null);
 
@@ -337,16 +721,34 @@ export function mapAppsScriptPayload(
       totalInstallments: Math.max(inst.totalInstallments, maxInstallmentTotal),
     }));
 
-    const installmentsSum = normalizedInstallments.reduce(
-      (sum, inst) => sum + inst.amount,
-      0
-    );
+    const installmentsSum =
+      Math.round(
+        normalizedInstallments.reduce((sum, inst) => sum + inst.amount, 0) * 100
+      ) / 100;
+
+    const totalContratadoParsed = parseBRLAmountStrict(c.totalContratado);
+    if (!totalContratadoParsed.ok) {
+      parseIssues.push({
+        scope: 'cliente',
+        rowId: id,
+        clientId: id,
+        clientName: fullName,
+        field: 'totalContratado',
+        rawValue: totalContratadoParsed.raw,
+        reason: totalContratadoParsed.error ?? 'Total contratado inválido',
+      });
+    }
+
     const contractedTotal =
-      parseBRLAmount(c.totalContratado) || installmentsSum;
+      totalContratadoParsed.ok && totalContratadoParsed.value > 0
+        ? totalContratadoParsed.value
+        : installmentsSum;
 
     const noteParts: string[] = [];
-    const entrada = parseBRLAmount(c.entrada);
-    const exitoPct = parseBRLAmount(c.exitoPercentual);
+    const entradaParsed = parseBRLAmountStrict(c.entrada);
+    const exitoParsed = parseBRLAmountStrict(c.exitoPercentual);
+    const entrada = entradaParsed.ok && entradaParsed.value > 0 ? entradaParsed.value : 0;
+    const exitoPct = exitoParsed.ok && exitoParsed.value > 0 ? exitoParsed.value : 0;
     if (entrada > 0) {
       noteParts.push(
         `Entrada: ${new Intl.NumberFormat('pt-BR', {
@@ -379,8 +781,6 @@ export function mapAppsScriptPayload(
 
     const rawPhone = String(c.whatsapp ?? c.telefone ?? '').trim();
 
-    const rawCpf = String(c.cpf ?? '').trim();
-
     return {
       id,
       fullName,
@@ -402,27 +802,43 @@ export function mapAppsScriptPayload(
     };
   };
 
-  const clients: ClientCase[] = rawClientes.map((c, idx) => {
-    const cid = String(c.id ?? '').trim();
-    const cname = normalizeText(String(c.nome ?? ''));
-    const byId = cid ? parcelasByClientId.get(cid) ?? [] : [];
-    const byName = cname ? parcelasByClientName.get(cname) ?? [] : [];
-    // Deduplicate combined matches preserving order
-    const seen = new Set<AppsScriptInstallmentRow>();
-    const combined: AppsScriptInstallmentRow[] = [];
-    for (const p of [...byId, ...byName]) {
-      if (!seen.has(p)) {
-        seen.add(p);
-        combined.push(p);
+  const baseClients: ClientCase[] = [];
+  rawClientes.forEach((c, idx) => {
+    if (!c || typeof c !== 'object') return;
+    try {
+      const cid = String(c.id ?? '').trim();
+      const cname = normalizeText(String(c.nome ?? ''));
+      const byId = cid ? parcelasByClientId.get(cid) ?? [] : [];
+      const byName = cname ? parcelasByClientName.get(cname) ?? [] : [];
+      const seen = new Set<AppsScriptInstallmentRow>();
+      const combined: AppsScriptInstallmentRow[] = [];
+      for (const p of [...byId, ...byName]) {
+        if (!seen.has(p)) {
+          seen.add(p);
+          combined.push(p);
+        }
       }
+      baseClients.push(buildClientCase(c, idx, combined));
+    } catch (err: unknown) {
+      parseIssues.push({
+        scope: 'cliente',
+        rowId: String(c.id ?? `row-${idx + 1}`),
+        clientId: String(c.id ?? `row-${idx + 1}`),
+        clientName: String(c.nome ?? 'Cliente corrompido'),
+        field: 'row',
+        rawValue: JSON.stringify(c),
+        reason:
+          err instanceof Error
+            ? err.message
+            : 'Erro inesperado ao mapear cliente',
+      });
     }
-    return buildClientCase(c, idx, combined);
   });
 
   // Handle orphan installments whose client wasn't listed in `clientes`
   const orphanGroups = new Map<string, AppsScriptInstallmentRow[]>();
   for (const p of rawParcelas) {
-    if (consumedParcelas.has(p)) continue;
+    if (!p || typeof p !== 'object' || consumedParcelas.has(p)) continue;
     const key =
       String(p.idCliente ?? '').trim() ||
       normalizeText(String(p.cliente ?? '')) ||
@@ -432,10 +848,10 @@ export function mapAppsScriptPayload(
     orphanGroups.set(key, list);
   }
 
-  let orphanIdx = clients.length;
+  let orphanIdx = baseClients.length;
   for (const [, group] of orphanGroups.entries()) {
     const first = group[0];
-    clients.push(
+    baseClients.push(
       buildClientCase(
         {
           id: first.idCliente ?? `as-orphan-${orphanIdx + 1}`,
@@ -448,6 +864,20 @@ export function mapAppsScriptPayload(
     );
     orphanIdx += 1;
   }
+
+  // Triangulation Health Check (Sheets SSOT <-> Drive <-> Calendar)
+  const healthReport = runPortfolioHealthCheck(
+    baseClients,
+    normalizedDriveEtapas,
+    rawEventosAgenda,
+    parseIssues
+  );
+
+  const clients: EnrichedClientCase[] = baseClients.map((client) => ({
+    ...client,
+    syncWarnings: healthReport.warningsByClientId[client.id] ?? [],
+    healthCheck: healthReport.healthByClientId[client.id],
+  }));
 
   const totalParcelasMapped = clients.reduce(
     (sum, c) => sum + c.installments.length,
@@ -462,6 +892,8 @@ export function mapAppsScriptPayload(
     clients,
     calendarEvents: rawEventosAgenda,
     driveEtapas: normalizedDriveEtapas,
+    parseIssues,
+    healthReport,
     summary: {
       syncedAt: new Date().toISOString(),
       clientesCount: clients.length,

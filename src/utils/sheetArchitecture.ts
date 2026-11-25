@@ -60,58 +60,345 @@ export function resolveModality(rawModality: string | undefined): PaymentModalit
   return 'Parcelado';
 }
 
-export function parseBRLAmount(raw: unknown): number {
+export interface StrictCurrencyParseResult {
+  ok: boolean;
+  value: number;
+  raw: string;
+  isEmpty: boolean;
+  error?: string;
+}
+
+export interface StrictDateParseResult {
+  ok: boolean;
+  iso?: string;
+  date?: Date;
+  raw: string;
+  isEmpty: boolean;
+  error?: string;
+}
+
+const SHEET_ERROR_TOKENS = new Set([
+  '#ref!',
+  '#value!',
+  '#name?',
+  '#div/0!',
+  '#n/a',
+  '#num!',
+  '#error!',
+  'nan',
+  'infinity',
+  '-infinity',
+  'invalid date',
+]);
+
+function isValidCalendarDate(year: number, month: number, day: number): Date | null {
+  if (
+    !Number.isInteger(year) ||
+    !Number.isInteger(month) ||
+    !Number.isInteger(day) ||
+    year < 1900 ||
+    year > 2100 ||
+    month < 1 ||
+    month > 12 ||
+    day < 1 ||
+    day > 31
+  ) {
+    return null;
+  }
+  const dt = new Date(Date.UTC(year, month - 1, day));
+  if (
+    Number.isNaN(dt.getTime()) ||
+    dt.getUTCFullYear() !== year ||
+    dt.getUTCMonth() !== month - 1 ||
+    dt.getUTCDate() !== day
+  ) {
+    return null;
+  }
+  return dt;
+}
+
+/**
+ * Strict BRL/numeric parser: converts strings like "R$ 1.500,00" into finite numbers
+ * without silently leaking NaN/Infinity. Explicitly flags corrupted cells.
+ */
+export function parseBRLAmountStrict(raw: unknown): StrictCurrencyParseResult {
+  if (raw === null || raw === undefined) {
+    return { ok: true, value: 0, raw: '', isEmpty: true };
+  }
+
   if (typeof raw === 'number') {
-    return Number.isFinite(raw) ? raw : 0;
-  }
-  const text = String(raw ?? '').replace(/[R$\s]/g, '').trim();
-  if (!text) return 0;
-
-  // If comma exists (Brazilian format: 1.500,00 or 1500,50)
-  if (text.includes(',')) {
-    const cleaned = text.replace(/\./g, '').replace(',', '.');
-    const num = Number(cleaned);
-    return Number.isFinite(num) ? num : 0;
-  }
-
-  // If dot exists without comma: 1500.50 -> decimal; 1.500 -> thousands separator
-  if (text.includes('.')) {
-    if (/^\d+\.\d{1,2}$/.test(text)) {
-      const num = Number(text);
-      return Number.isFinite(num) ? num : 0;
+    if (!Number.isFinite(raw)) {
+      return {
+        ok: false,
+        value: 0,
+        raw: String(raw),
+        isEmpty: false,
+        error: `Valor numérico inválido (${String(raw)})`,
+      };
     }
-    const cleaned = text.replace(/\./g, '');
-    const num = Number(cleaned);
-    return Number.isFinite(num) ? num : 0;
+    return {
+      ok: true,
+      value: Math.round(raw * 100) / 100,
+      raw: String(raw),
+      isEmpty: false,
+    };
   }
 
-  const num = Number(text);
-  return Number.isFinite(num) ? num : 0;
+  const rawText = String(raw).trim();
+  if (!rawText || rawText === '-' || rawText === '—' || rawText === '--') {
+    return { ok: true, value: 0, raw: rawText, isEmpty: true };
+  }
+
+  const lower = rawText.toLowerCase();
+  if (SHEET_ERROR_TOKENS.has(lower)) {
+    return {
+      ok: false,
+      value: 0,
+      raw: rawText,
+      isEmpty: false,
+      error: `Erro de fórmula na célula financeira (${rawText})`,
+    };
+  }
+
+  let isNegative = false;
+  let cleaned = rawText
+    .replace(/\u00A0/g, ' ')
+    .replace(/R\$/gi, '')
+    .replace(/\s+/g, '')
+    .trim();
+
+  if (cleaned.startsWith('(') && cleaned.endsWith(')')) {
+    isNegative = true;
+    cleaned = cleaned.slice(1, -1).trim();
+  }
+  if (cleaned.startsWith('-')) {
+    isNegative = true;
+    cleaned = cleaned.slice(1).trim();
+  } else if (cleaned.startsWith('+')) {
+    cleaned = cleaned.slice(1).trim();
+  }
+
+  // Strip optional percentage sign for percentage fields (e.g. "30%")
+  cleaned = cleaned.replace(/%$/, '');
+
+  if (!cleaned || !/^[\d.,]+$/.test(cleaned)) {
+    return {
+      ok: false,
+      value: 0,
+      raw: rawText,
+      isEmpty: false,
+      error: `Formato monetário corrompido ("${rawText}")`,
+    };
+  }
+
+  let numericStr = cleaned;
+  const commaCount = (cleaned.match(/,/g) ?? []).length;
+  const dotCount = (cleaned.match(/\./g) ?? []).length;
+
+  if (commaCount > 1) {
+    return {
+      ok: false,
+      value: 0,
+      raw: rawText,
+      isEmpty: false,
+      error: `Múltiplas vírgulas no valor monetário ("${rawText}")`,
+    };
+  }
+
+  if (commaCount === 1) {
+    // Brazilian format: 1.500,00 or 1500,50
+    const parts = cleaned.split(',');
+    if (parts[1].includes('.')) {
+      return {
+        ok: false,
+        value: 0,
+        raw: rawText,
+        isEmpty: false,
+        error: `Separador decimal inconsistente ("${rawText}")`,
+      };
+    }
+    numericStr = `${parts[0].replace(/\./g, '')}.${parts[1]}`;
+  } else if (dotCount > 0) {
+    // Dot without comma: 1500.50 -> decimal; 1.500 or 1.500.000 -> thousands separator
+    if (dotCount === 1 && /^\d+\.\d{1,2}$/.test(cleaned)) {
+      numericStr = cleaned;
+    } else if (/^\d{1,3}(?:\.\d{3})+$/.test(cleaned)) {
+      numericStr = cleaned.replace(/\./g, '');
+    } else {
+      return {
+        ok: false,
+        value: 0,
+        raw: rawText,
+        isEmpty: false,
+        error: `Separador de milhar/decimal inválido ("${rawText}")`,
+      };
+    }
+  }
+
+  const parsed = Number(numericStr);
+  if (!Number.isFinite(parsed)) {
+    return {
+      ok: false,
+      value: 0,
+      raw: rawText,
+      isEmpty: false,
+      error: `Conversão numérica falhou ("${rawText}")`,
+    };
+  }
+
+  const signed = isNegative ? -parsed : parsed;
+  return {
+    ok: true,
+    value: Math.round(signed * 100) / 100,
+    raw: rawText,
+    isEmpty: false,
+  };
+}
+
+export function parseBRLAmount(raw: unknown): number {
+  const result = parseBRLAmountStrict(raw);
+  return result.ok && Number.isFinite(result.value) ? result.value : 0;
+}
+
+/**
+ * Strict date parser: converts DD/MM/YYYY, YYYY-MM-DD, Date objects, and Google Sheets
+ * serial dates into both ISO string and validated UTC Date without silent rollovers or Invalid Date.
+ */
+export function parseFlexibleDateStrict(raw: unknown): StrictDateParseResult {
+  if (raw === null || raw === undefined) {
+    return { ok: true, raw: '', isEmpty: true };
+  }
+
+  if (raw instanceof Date) {
+    if (Number.isNaN(raw.getTime())) {
+      return {
+        ok: false,
+        raw: 'Invalid Date',
+        isEmpty: false,
+        error: 'Objeto Date inválido',
+      };
+    }
+    const iso = raw.toISOString().slice(0, 10);
+    const dt = new Date(`${iso}T00:00:00.000Z`);
+    return { ok: true, iso, date: dt, raw: iso, isEmpty: false };
+  }
+
+  if (typeof raw === 'number') {
+    if (!Number.isFinite(raw) || raw <= 20000 || raw >= 80000) {
+      return {
+        ok: false,
+        raw: String(raw),
+        isEmpty: false,
+        error: `Número serial de data fora do intervalo (${String(raw)})`,
+      };
+    }
+    // Google Sheets serial date (days since 1899-12-30)
+    const utcMs = Date.UTC(1899, 11, 30) + Math.round(raw) * 86400000;
+    const dt = new Date(utcMs);
+    if (Number.isNaN(dt.getTime())) {
+      return {
+        ok: false,
+        raw: String(raw),
+        isEmpty: false,
+        error: `Serial de data inválido (${String(raw)})`,
+      };
+    }
+    const iso = dt.toISOString().slice(0, 10);
+    return { ok: true, iso, date: dt, raw: String(raw), isEmpty: false };
+  }
+
+  const text = String(raw).trim();
+  if (!text || text === '-' || text === '—' || text === '--') {
+    return { ok: true, raw: text, isEmpty: true };
+  }
+
+  const lower = text.toLowerCase();
+  if (SHEET_ERROR_TOKENS.has(lower)) {
+    return {
+      ok: false,
+      raw: text,
+      isEmpty: false,
+      error: `Erro de fórmula na célula de data (${text})`,
+    };
+  }
+
+  // ISO format: YYYY-MM-DD (optionally followed by T... or time)
+  const isoMatch = text.match(/^(\d{4})-(\d{2})-(\d{2})(?:[T\s].*)?$/);
+  if (isoMatch) {
+    const year = Number(isoMatch[1]);
+    const month = Number(isoMatch[2]);
+    const day = Number(isoMatch[3]);
+    const dt = isValidCalendarDate(year, month, day);
+    if (!dt) {
+      return {
+        ok: false,
+        raw: text,
+        isEmpty: false,
+        error: `Data ISO inexistente no calendário ("${text}")`,
+      };
+    }
+    const iso = `${String(year).padStart(4, '0')}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+    return { ok: true, iso, date: dt, raw: text, isEmpty: false };
+  }
+
+  // Brazilian format: DD/MM/YYYY or D/M/YY (optionally with trailing time)
+  const brMatch = text.match(
+    /^(\d{1,2})[/.-](\d{1,2})[/.-](\d{2,4})(?:\s+\d{1,2}:\d{2}(?::\d{2})?)?$/
+  );
+  if (brMatch) {
+    const day = Number(brMatch[1]);
+    const month = Number(brMatch[2]);
+    const year = Number(brMatch[3].length === 2 ? `20${brMatch[3]}` : brMatch[3]);
+    const dt = isValidCalendarDate(year, month, day);
+    if (!dt) {
+      return {
+        ok: false,
+        raw: text,
+        isEmpty: false,
+        error: `Data brasileira inexistente no calendário ("${text}")`,
+      };
+    }
+    const iso = `${String(year).padStart(4, '0')}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+    return { ok: true, iso, date: dt, raw: text, isEmpty: false };
+  }
+
+  return {
+    ok: false,
+    raw: text,
+    isEmpty: false,
+    error: `Formato de data não reconhecido ("${text}")`,
+  };
 }
 
 export function parseFlexibleDateISO(raw: unknown): string | undefined {
-  if (typeof raw === 'number' && Number.isFinite(raw) && raw > 20000 && raw < 80000) {
-    // Google Sheets serial date (days since 1899-12-30)
-    const utcMs = Date.UTC(1899, 11, 30) + Math.round(raw) * 86400000;
-    return new Date(utcMs).toISOString().slice(0, 10);
-  }
+  const result = parseFlexibleDateStrict(raw);
+  return result.ok ? result.iso : undefined;
+}
 
-  const text = String(raw ?? '').trim();
-  if (!text) return undefined;
-  const isoMatch = text.match(/^(\d{4}-\d{2}-\d{2})(?:[T\s].*)?$/);
-  if (isoMatch) return isoMatch[1];
-
-  const brMatch = text.match(/^(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})$/);
-  if (brMatch) {
-    const [, d, m, yRaw] = brMatch;
-    const y = yRaw.length === 2 ? `20${yRaw}` : yRaw;
-    const monthNum = Number(m);
-    const dayNum = Number(d);
-    if (monthNum >= 1 && monthNum <= 12 && dayNum >= 1 && dayNum <= 31) {
-      return `${y}-${m.padStart(2, '0')}-${d.padStart(2, '0')}`;
+/**
+ * Checks whether a Drive folder URL points to a specific, valid Google Drive folder
+ * (rejecting empty values, malformed URLs, non-HTTPS schemes, and the generic /my-drive fallback).
+ */
+export function isValidDriveFolderUrl(url?: string): boolean {
+  const trimmed = String(url ?? '').trim();
+  if (!trimmed) return false;
+  try {
+    const parsed = new URL(trimmed);
+    if (parsed.protocol !== 'https:') return false;
+    if (parsed.hostname !== 'drive.google.com') return false;
+    if (
+      parsed.pathname === '/drive/my-drive' ||
+      parsed.pathname === '/drive/my-drive/'
+    ) {
+      return false;
     }
+    return (
+      /^\/drive(?:\/u\/\d+)?\/folders\/[a-zA-Z0-9_-]{4,}/.test(parsed.pathname) ||
+      (parsed.pathname === '/open' && Boolean(parsed.searchParams.get('id')))
+    );
+  } catch {
+    return false;
   }
-  return undefined;
 }
 
 export function analyzeDriveArchitecture(
@@ -481,105 +768,113 @@ export function parseSheetTabToClients(
   const dataRows = rows.slice(headerIdx + 1);
 
   dataRows.forEach((row, offset) => {
-    if (!Array.isArray(row)) return;
-    const sheetRowNumber = headerIdx + 2 + offset;
-    const nameCol = cols.idxName >= 0 ? cols.idxName : 0;
-    const rawName = String(row[nameCol] ?? '').trim();
+    try {
+      if (!Array.isArray(row)) return;
+      const sheetRowNumber = headerIdx + 2 + offset;
+      const nameCol = cols.idxName >= 0 ? cols.idxName : 0;
+      const rawName = String(row[nameCol] ?? '').trim();
 
-    // Skip empty or obvious summary/total lines
-    if (!rawName) return;
-    const clientKey = normalizeText(rawName);
-    if (
-      clientKey === 'total' ||
-      clientKey === 'totais' ||
-      clientKey.startsWith('total ')
-    ) {
-      return;
-    }
+      // Skip empty or obvious summary/total lines
+      if (!rawName) return;
+      const clientKey = normalizeText(rawName);
+      if (
+        clientKey === 'total' ||
+        clientKey === 'totais' ||
+        clientKey.startsWith('total ')
+      ) {
+        return;
+      }
 
-    const amount = parseBRLAmount(
-      row[cols.idxAmount >= 0 ? cols.idxAmount : 3]
-    );
-    const dueDate = parseFlexibleDateISO(
-      row[cols.idxDueDate >= 0 ? cols.idxDueDate : 4]
-    );
-
-    const paidCol = cols.idxPaidDate >= 0 ? cols.idxPaidDate : 5;
-    const rawPaidOrStatus = String(row[paidCol] ?? '').trim();
-    const normPaidStatus = normalizeText(rawPaidOrStatus);
-    const isMarkedPaid =
-      normPaidStatus.includes('pag') ||
-      normPaidStatus.includes('quit') ||
-      normPaidStatus === 'sim' ||
-      normPaidStatus === 'ok' ||
-      normPaidStatus.includes('recebid');
-    const parsedPaidDate =
-      parseFlexibleDateISO(rawPaidOrStatus) ??
-      (isMarkedPaid ? dueDate ?? fallbackTodayISO : undefined);
-
-    const parcelText = String(
-      cols.idxParcelNum >= 0 ? row[cols.idxParcelNum] ?? '' : ''
-    ).trim();
-    const parcelMatch = parcelText.match(/(\d+)\s*\/\s*(\d+)/);
-
-    const driveMatch = findClientInDrive(rawName, driveSummary);
-
-    let existing = clientMap.get(clientKey);
-    if (!existing) {
-      const explicitStage =
-        cols.idxStage >= 0 ? String(row[cols.idxStage] ?? '').trim() : '';
-      const stage = explicitStage
-        ? resolveStage(explicitStage)
-        : driveMatch.stage ?? DRIVE_STAGES[0];
-      const modality = resolveModality(
-        cols.idxModality >= 0 ? String(row[cols.idxModality] ?? '') : ''
+      const amountParsed = parseBRLAmountStrict(
+        row[cols.idxAmount >= 0 ? cols.idxAmount : 3]
       );
-      const explicitDriveUrl =
-        cols.idxDriveUrl >= 0 ? String(row[cols.idxDriveUrl] ?? '').trim() : '';
-      const driveUrl =
-        explicitDriveUrl ||
-        driveMatch.folderUrl ||
-        driveSummary?.rootFolderUrl ||
-        'https://drive.google.com/drive/my-drive';
+      const amount = amountParsed.ok && amountParsed.value > 0 ? amountParsed.value : 0;
+      const dueDateParsed = parseFlexibleDateStrict(
+        row[cols.idxDueDate >= 0 ? cols.idxDueDate : 4]
+      );
+      const dueDate = dueDateParsed.ok ? dueDateParsed.iso : undefined;
 
-      const rawPhone =
-        cols.idxPhone >= 0 ? String(row[cols.idxPhone] ?? '').trim() : '';
-      const rawCase =
-        cols.idxCase >= 0 ? String(row[cols.idxCase] ?? '').trim() : '';
+      const paidCol = cols.idxPaidDate >= 0 ? cols.idxPaidDate : 5;
+      const rawPaidOrStatus = String(row[paidCol] ?? '').trim();
+      const normPaidStatus = normalizeText(rawPaidOrStatus);
+      const isMarkedPaid =
+        normPaidStatus.includes('pag') ||
+        normPaidStatus.includes('quit') ||
+        normPaidStatus === 'sim' ||
+        normPaidStatus === 'ok' ||
+        normPaidStatus.includes('recebid');
+      const paidDateParsed = parseFlexibleDateStrict(rawPaidOrStatus);
+      const parsedPaidDate =
+        (paidDateParsed.ok ? paidDateParsed.iso : undefined) ??
+        (isMarkedPaid ? dueDate ?? fallbackTodayISO : undefined);
 
-      existing = {
-        id: `gs-${sheetRowNumber}`,
-        fullName: rawName,
-        phone: rawPhone || '11999999999',
-        caseType: rawCase || 'Direito de Família',
-        driveStage: stage,
-        driveFolderUrl: driveUrl,
-        modality,
-        contractedTotal: amount,
-        installments: [],
-      };
-      clientMap.set(clientKey, existing);
-    } else if (amount > 0) {
-      existing.contractedTotal += amount;
-    }
+      const parcelText = String(
+        cols.idxParcelNum >= 0 ? row[cols.idxParcelNum] ?? '' : ''
+      ).trim();
+      const parcelMatch = parcelText.match(/(\d+)\s*\/\s*(\d+)/);
 
-    if (dueDate && amount > 0) {
-      const inst: Installment = {
-        id: `gs-row-${sheetRowNumber}`,
-        clientId: existing.id,
-        clientName: existing.fullName,
-        installmentNumber: parcelMatch
-          ? Number(parcelMatch[1])
-          : existing.installments.length + 1,
-        totalInstallments: parcelMatch
-          ? Number(parcelMatch[2])
-          : existing.installments.length + 1,
-        amount,
-        dueDate,
-        paidDate: parsedPaidDate,
-        sheetRowNumber,
-      };
-      existing.installments.push(inst);
+      const driveMatch = findClientInDrive(rawName, driveSummary);
+
+      let existing = clientMap.get(clientKey);
+      if (!existing) {
+        const explicitStage =
+          cols.idxStage >= 0 ? String(row[cols.idxStage] ?? '').trim() : '';
+        const stage = explicitStage
+          ? resolveStage(explicitStage)
+          : driveMatch.stage ?? DRIVE_STAGES[0];
+        const modality = resolveModality(
+          cols.idxModality >= 0 ? String(row[cols.idxModality] ?? '') : ''
+        );
+        const explicitDriveUrl =
+          cols.idxDriveUrl >= 0 ? String(row[cols.idxDriveUrl] ?? '').trim() : '';
+        const driveUrl =
+          explicitDriveUrl ||
+          driveMatch.folderUrl ||
+          driveSummary?.rootFolderUrl ||
+          'https://drive.google.com/drive/my-drive';
+
+        const rawPhone =
+          cols.idxPhone >= 0 ? String(row[cols.idxPhone] ?? '').trim() : '';
+        const rawCase =
+          cols.idxCase >= 0 ? String(row[cols.idxCase] ?? '').trim() : '';
+
+        existing = {
+          id: `gs-${sheetRowNumber}`,
+          fullName: rawName,
+          phone: rawPhone || '11999999999',
+          caseType: rawCase || 'Direito de Família',
+          driveStage: stage,
+          driveFolderUrl: driveUrl,
+          modality,
+          contractedTotal: amount,
+          installments: [],
+        };
+        clientMap.set(clientKey, existing);
+      } else if (amount > 0) {
+        existing.contractedTotal =
+          Math.round((existing.contractedTotal + amount) * 100) / 100;
+      }
+
+      if (dueDate && amount > 0) {
+        const inst: Installment = {
+          id: `gs-row-${sheetRowNumber}`,
+          clientId: existing.id,
+          clientName: existing.fullName,
+          installmentNumber: parcelMatch
+            ? Number(parcelMatch[1])
+            : existing.installments.length + 1,
+          totalInstallments: parcelMatch
+            ? Number(parcelMatch[2])
+            : existing.installments.length + 1,
+          amount,
+          dueDate,
+          paidDate: parsedPaidDate,
+          sheetRowNumber,
+        };
+        existing.installments.push(inst);
+      }
+    } catch {
+      // Fault isolation: never allow a corrupted row to break the remaining portfolio
     }
   });
 

@@ -11,6 +11,10 @@ import {
   isExcludedZapSignFolder,
   normalizeZapSignDocsPayload,
 } from './src/utils/zapsignLogic.ts';
+import {
+  mapAppsScriptPayload,
+  type EnrichedAppsScriptSyncResult,
+} from './src/utils/appsScriptMapper.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -18,6 +22,163 @@ const __dirname = path.dirname(__filename);
 const PORT = Number(process.env.PORT) || 3000;
 const PRIMARY_MODEL = 'gemini-4-hydrogen';
 const FALLBACK_MODEL = 'gemini-3.1-flash-lite';
+const DEFAULT_WORKSPACE_APPS_SCRIPT_URL =
+  'https://script.google.com/macros/s/AKfycbxz9gSeBsBVBAWNbLZOn4S4NSWQop7sk7FokMc_0bFzDqdLxRzGlmkDYAe1fFA5ruM2wA/exec';
+const ALLOWED_APPS_SCRIPT_HOSTS = new Set([
+  'script.google.com',
+  'script.googleusercontent.com',
+]);
+const WORKSPACE_CACHE_FRESH_TTL_MS = 15_000;
+const WORKSPACE_CACHE_STALE_TTL_MS = 30 * 60_000;
+const WORKSPACE_CACHE_MAX_ENTRIES = 10;
+const WORKSPACE_FETCH_TIMEOUT_MS = 65_000;
+
+interface ServerWorkspaceCacheEntry {
+  data: EnrichedAppsScriptSyncResult;
+  cachedAt: number;
+  freshUntil: number;
+  expiresAt: number;
+}
+
+const serverWorkspaceCache = new Map<string, ServerWorkspaceCacheEntry>();
+const serverWorkspaceInFlight = new Map<
+  string,
+  Promise<EnrichedAppsScriptSyncResult>
+>();
+
+function resolveAllowedAppsScriptUrl(rawUrl?: string): {
+  ok: true;
+  url: string;
+} | {
+  ok: false;
+  error: string;
+} {
+  const candidate =
+    String(rawUrl ?? '').trim() ||
+    String(process.env.APPS_SCRIPT_URL ?? '').trim() ||
+    DEFAULT_WORKSPACE_APPS_SCRIPT_URL;
+
+  try {
+    const parsed = new URL(candidate);
+    if (parsed.protocol !== 'https:') {
+      return {
+        ok: false,
+        error: 'URL do Google Apps Script deve utilizar HTTPS.',
+      };
+    }
+    if (!ALLOWED_APPS_SCRIPT_HOSTS.has(parsed.hostname.toLowerCase())) {
+      return {
+        ok: false,
+        error: 'Domínio não permitido para sincronização do Google Apps Script.',
+      };
+    }
+    if (!parsed.pathname.startsWith('/macros/s/')) {
+      return {
+        ok: false,
+        error: 'Caminho de implantação do Google Apps Script inválido.',
+      };
+    }
+    return { ok: true, url: parsed.toString() };
+  } catch {
+    return { ok: false, error: 'URL do Google Apps Script malformada.' };
+  }
+}
+
+function storeServerWorkspaceCache(
+  url: string,
+  data: EnrichedAppsScriptSyncResult
+): ServerWorkspaceCacheEntry {
+  if (
+    !serverWorkspaceCache.has(url) &&
+    serverWorkspaceCache.size >= WORKSPACE_CACHE_MAX_ENTRIES
+  ) {
+    const oldestKey = serverWorkspaceCache.keys().next().value;
+    if (oldestKey) serverWorkspaceCache.delete(oldestKey);
+  }
+  const now = Date.now();
+  const entry: ServerWorkspaceCacheEntry = {
+    data,
+    cachedAt: now,
+    freshUntil: now + WORKSPACE_CACHE_FRESH_TTL_MS,
+    expiresAt: now + WORKSPACE_CACHE_STALE_TTL_MS,
+  };
+  serverWorkspaceCache.set(url, entry);
+  return entry;
+}
+
+async function fetchAndMapWorkspaceFromServer(
+  targetUrl: string
+): Promise<EnrichedAppsScriptSyncResult> {
+  const existing = serverWorkspaceInFlight.get(targetUrl);
+  if (existing) return existing;
+
+  const job = (async () => {
+    const controller = new AbortController();
+    const timer = setTimeout(
+      () => controller.abort(),
+      WORKSPACE_FETCH_TIMEOUT_MS
+    );
+    try {
+      const upstream = await fetch(targetUrl, {
+        method: 'GET',
+        redirect: 'follow',
+        signal: controller.signal,
+      });
+      if (!upstream.ok) {
+        throw new Error(`HTTP_${upstream.status}`);
+      }
+      const json: unknown = await upstream.json();
+      const mapped = mapAppsScriptPayload(json);
+      storeServerWorkspaceCache(targetUrl, mapped);
+      return mapped;
+    } finally {
+      clearTimeout(timer);
+    }
+  })();
+
+  serverWorkspaceInFlight.set(targetUrl, job);
+  try {
+    return await job;
+  } finally {
+    serverWorkspaceInFlight.delete(targetUrl);
+  }
+}
+
+function paginateWorkspaceResult(
+  data: EnrichedAppsScriptSyncResult,
+  rawPage: unknown,
+  rawPageSize: unknown
+): EnrichedAppsScriptSyncResult & {
+  pagination?: {
+    page: number;
+    pageSize: number;
+    totalClients: number;
+    totalPages: number;
+    hasMore: boolean;
+  };
+} {
+  if (rawPage === undefined && rawPageSize === undefined) {
+    return data;
+  }
+  const page = Math.max(1, Math.floor(Number(rawPage) || 1));
+  const pageSize = Math.min(500, Math.max(1, Math.floor(Number(rawPageSize) || 50)));
+  const totalClients = data.clients.length;
+  const totalPages = Math.max(1, Math.ceil(totalClients / pageSize));
+  const start = (page - 1) * pageSize;
+  const pagedClients = data.clients.slice(start, start + pageSize);
+
+  return {
+    ...data,
+    clients: pagedClients,
+    pagination: {
+      page,
+      pageSize,
+      totalClients,
+      totalPages,
+      hasMore: page < totalPages,
+    },
+  };
+}
 
 function loadFirebaseProjectId(): string {
   try {
@@ -338,6 +499,98 @@ async function startServer() {
       });
     }
   });
+
+  app.get('/api/workspace/sync', requireAuthorizedUser, async (req, res) => {
+    const rawUrl =
+      typeof req.query.url === 'string' ? req.query.url : undefined;
+    const validated = resolveAllowedAppsScriptUrl(rawUrl);
+    if (!validated.ok) {
+      res.status(400).json({ error: validated.error });
+      return;
+    }
+
+    const forceRefresh =
+      req.query.force === 'true' || req.query.force === '1';
+    const now = Date.now();
+    const cached = !forceRefresh
+      ? serverWorkspaceCache.get(validated.url)
+      : undefined;
+
+    if (cached && now <= cached.expiresAt) {
+      const isFresh = now <= cached.freshUntil;
+      if (!isFresh) {
+        // Stale-while-revalidate: serve immediately and refresh in background
+        void fetchAndMapWorkspaceFromServer(validated.url).catch((err) => {
+          console.error(
+            '[Workspace SWR] Falha na revalidação em background:',
+            err instanceof Error ? err.message : err
+          );
+        });
+      }
+
+      const payload = paginateWorkspaceResult(
+        cached.data,
+        req.query.page,
+        req.query.pageSize
+      );
+      res.setHeader('X-Cache', isFresh ? 'HIT' : 'STALE');
+      res.json({
+        ...payload,
+        cache: {
+          status: isFresh ? 'HIT' : 'STALE',
+          cachedAt: new Date(cached.cachedAt).toISOString(),
+          revalidating: !isFresh,
+        },
+      });
+      return;
+    }
+
+    try {
+      const fresh = await fetchAndMapWorkspaceFromServer(validated.url);
+      const payload = paginateWorkspaceResult(
+        fresh,
+        req.query.page,
+        req.query.pageSize
+      );
+      res.setHeader('X-Cache', 'MISS');
+      res.json({
+        ...payload,
+        cache: {
+          status: 'MISS',
+          cachedAt: new Date().toISOString(),
+          revalidating: false,
+        },
+      });
+    } catch (err: unknown) {
+      console.error(
+        '[Workspace Sync] Erro ao sincronizar carteira:',
+        err instanceof Error ? err.message : err
+      );
+      res.status(502).json({
+        error:
+          'Falha ao sincronizar a planilha e os reflexos do Google Workspace no servidor.',
+      });
+    }
+  });
+
+  app.post(
+    '/api/workspace/cache/invalidate',
+    requireAuthorizedUser,
+    (req, res) => {
+      const body = (req.body ?? {}) as { url?: string };
+      if (typeof body.url === 'string' && body.url.trim()) {
+        const validated = resolveAllowedAppsScriptUrl(body.url);
+        if (!validated.ok) {
+          res.status(400).json({ error: validated.error });
+          return;
+        }
+        serverWorkspaceCache.delete(validated.url);
+      } else {
+        serverWorkspaceCache.clear();
+      }
+      res.json({ ok: true });
+    }
+  );
 
   const distDir = path.resolve(__dirname, 'dist');
   const distIndexPath = path.join(distDir, 'index.html');

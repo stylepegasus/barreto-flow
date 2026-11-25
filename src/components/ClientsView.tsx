@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import {
+  AlertTriangle,
   CalendarClock,
   CalendarDays,
   CheckCircle2,
@@ -11,6 +12,7 @@ import {
   FolderOpen,
   RefreshCw,
   Search,
+  ShieldAlert,
   Sparkles,
   UserPlus,
 } from 'lucide-react';
@@ -26,6 +28,12 @@ import {
   ZapSignSignedDoc,
   ZapSignState,
 } from '../types/honorarios';
+import type {
+  ClientSyncWarning,
+  EnrichedClientCase,
+  PortfolioHealthReport,
+  RowParseIssue,
+} from '../utils/appsScriptMapper';
 import {
   calculateClientTotals,
   computeInstallmentStatus,
@@ -39,13 +47,15 @@ import {
 } from '../utils/zapsignLogic';
 
 interface ClientsViewProps {
-  clients: ClientCase[];
+  clients: EnrichedClientCase[];
   todayISO: string;
   zapSignState?: ZapSignState;
   matchedZapSignByClientId?: Record<string, ZapSignSignedDoc[]>;
   unmatchedZapSignDocs?: ZapSignSignedDoc[];
   unmatchedZapSignItems?: ZapSignCrossReferenceItem[];
   proceduralZapSignCount?: number;
+  healthReport?: PortfolioHealthReport | null;
+  parseIssues?: RowParseIssue[];
   onRefreshZapSign?: () => void;
   onPrefillZapSignItem?: (item: ZapSignCrossReferenceItem) => void;
   onQuitarParcela: (item: InstallmentWithStatus) => void;
@@ -92,6 +102,8 @@ export const ClientsView: React.FC<ClientsViewProps> = ({
   unmatchedZapSignDocs = [],
   unmatchedZapSignItems,
   proceduralZapSignCount = 0,
+  healthReport,
+  parseIssues = [],
   onRefreshZapSign,
   onPrefillZapSignItem,
   onQuitarParcela,
@@ -104,11 +116,24 @@ export const ClientsView: React.FC<ClientsViewProps> = ({
   const [modalityFilter, setModalityFilter] = useState<
     PaymentModality | 'Todas'
   >('Todas');
+  const [onlyWithWarnings, setOnlyWithWarnings] = useState(false);
   const [expandedClientId, setExpandedClientId] = useState<string | null>(null);
   const [expandedDocsClientId, setExpandedDocsClientId] = useState<
     string | null
   >(null);
   const [zapSignExpanded, setZapSignExpanded] = useState(false);
+  const [integrityExpanded, setIntegrityExpanded] = useState(false);
+
+  const getClientWarnings = (client: EnrichedClientCase): ClientSyncWarning[] =>
+    client.syncWarnings ?? healthReport?.warningsByClientId[client.id] ?? [];
+
+  const effectiveParseIssues =
+    parseIssues.length > 0 ? parseIssues : (healthReport?.parseIssues ?? []);
+  const clientsWithWarningsCount = clients.filter(
+    (c) => getClientWarnings(c).length > 0
+  ).length;
+  const hasIntegrityAlerts =
+    effectiveParseIssues.length > 0 || clientsWithWarningsCount > 0;
 
   useEffect(() => {
     if (!onSessionContextChange) return;
@@ -141,11 +166,15 @@ export const ClientsView: React.FC<ClientsViewProps> = ({
       inSpreadsheet: false,
     }));
 
-  const filtered = filterClients(clients, {
+  const baseFiltered = filterClients(clients, {
     search,
     stage: stageFilter,
     modality: modalityFilter,
-  });
+  }) as EnrichedClientCase[];
+
+  const filtered = onlyWithWarnings
+    ? baseFiltered.filter((c) => getClientWarnings(c).length > 0)
+    : baseFiltered;
 
   const toggleExpand = (clientId: string) => {
     setExpandedClientId((prev) => (prev === clientId ? null : clientId));
@@ -342,6 +371,106 @@ export const ClientsView: React.FC<ClientsViewProps> = ({
         </div>
       )}
 
+      {/* Discrete Integrity & Parse Issues Banner (Triangulation Sheets SSOT × Drive × Calendar) */}
+      {hasIntegrityAlerts && (
+        <div
+          data-testid="clients-integrity-banner"
+          className="rounded-xl border border-[#313131]/18 bg-white px-4 py-3 text-xs text-[#313131] space-y-3"
+        >
+          <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+            <div className="flex items-start gap-2.5">
+              <ShieldAlert className="mt-0.5 h-4 w-4 text-[#8D6A14] shrink-0" />
+              <div>
+                <p className="font-semibold text-[#313131]">
+                  Integridade da sincronização (Planilha SSOT × Drive × Calendar)
+                </p>
+                <p className="mt-0.5 text-[#313131]/70">
+                  {[
+                    clientsWithWarningsCount > 0
+                      ? `${clientsWithWarningsCount} ${
+                          clientsWithWarningsCount === 1
+                            ? 'cliente com alerta operacional'
+                            : 'clientes com alertas operacionais'
+                        }`
+                      : null,
+                    effectiveParseIssues.length > 0
+                      ? `${effectiveParseIssues.length} ${
+                          effectiveParseIssues.length === 1
+                            ? 'célula da planilha com erro de data/valor isolada'
+                            : 'células da planilha com erro de data/valor isoladas'
+                        }`
+                      : null,
+                  ]
+                    .filter(Boolean)
+                    .join(' · ')}
+                  .
+                </p>
+              </div>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2 shrink-0">
+              {clientsWithWarningsCount > 0 && (
+                <button
+                  type="button"
+                  onClick={() => setOnlyWithWarnings((prev) => !prev)}
+                  data-testid="clients-filter-warnings-btn"
+                  className={`inline-flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-medium whitespace-nowrap transition-colors ${
+                    onlyWithWarnings
+                      ? 'border-[#DCB14A] bg-[#313131] text-[#FFD559]'
+                      : 'border-[#313131]/20 bg-[#F6F3EC] text-[#313131] hover:border-[#DCB14A] hover:bg-white'
+                  }`}
+                >
+                  {onlyWithWarnings
+                    ? 'Exibindo apenas com alertas'
+                    : `Filtrar com alertas (${clientsWithWarningsCount})`}
+                </button>
+              )}
+              {effectiveParseIssues.length > 0 && (
+                <button
+                  type="button"
+                  onClick={() => setIntegrityExpanded((prev) => !prev)}
+                  aria-expanded={integrityExpanded}
+                  data-testid="clients-parse-issues-toggle-btn"
+                  className="inline-flex items-center gap-1 rounded-lg border border-[#313131]/20 bg-white px-2.5 py-1.5 text-xs font-medium text-[#313131] hover:border-[#DCB14A] whitespace-nowrap"
+                >
+                  <span>
+                    {integrityExpanded
+                      ? 'Ocultar erros da planilha'
+                      : `Erros de célula (${effectiveParseIssues.length})`}
+                  </span>
+                  {integrityExpanded ? (
+                    <ChevronUp className="h-3.5 w-3.5 text-[#8D6A14]" />
+                  ) : (
+                    <ChevronDown className="h-3.5 w-3.5 text-[#8D6A14]" />
+                  )}
+                </button>
+              )}
+            </div>
+          </div>
+
+          {integrityExpanded && effectiveParseIssues.length > 0 && (
+            <ul className="max-h-52 overflow-y-auto divide-y divide-[#313131]/10 rounded-lg border border-[#313131]/10 bg-[#F6F3EC]/60">
+              {effectiveParseIssues.slice(0, 30).map((issue, idx) => (
+                <li
+                  key={`${issue.rowId}-${issue.field}-${idx}`}
+                  className="flex flex-col gap-1 px-3 py-2 text-[11px] sm:flex-row sm:items-center sm:justify-between"
+                >
+                  <span className="font-medium text-[#313131]">
+                    {issue.clientName}{' '}
+                    <span className="font-normal text-[#313131]/60">
+                      ({issue.scope} · campo "{issue.field}")
+                    </span>
+                  </span>
+                  <span className="text-[#313131]/75 tabular-nums">
+                    Valor "{issue.rawValue || 'vazio'}" — {issue.reason}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      )}
+
       {/* Filters Toolbar */}
       <div className="rounded-xl border border-[#313131]/12 bg-white p-4">
         <div className="grid grid-cols-1 gap-4 md:grid-cols-12">
@@ -430,6 +559,7 @@ export const ClientsView: React.FC<ClientsViewProps> = ({
               setSearch('');
               setStageFilter('Todas');
               setModalityFilter('Todas');
+              setOnlyWithWarnings(false);
             }}
             className="mt-4 rounded-lg border border-[#313131]/20 bg-white px-4 py-2 text-xs font-medium text-[#313131] hover:bg-[#313131]/5"
           >
@@ -445,6 +575,23 @@ export const ClientsView: React.FC<ClientsViewProps> = ({
             const driveFiles = client.driveFiles ?? [];
             const clientZapSignDocs = matchedZapSignByClientId?.[client.id] ?? [];
             const latestZapSignDoc = clientZapSignDocs[0];
+            const clientWarnings = getClientWarnings(client);
+            const driveWarning = clientWarnings.find(
+              (w) =>
+                w.code === 'MISSING_DRIVE_FOLDER' ||
+                w.code === 'INVALID_DRIVE_URL'
+            );
+            const calendarWarnings = clientWarnings.filter(
+              (w) => w.code === 'MISSING_CALENDAR_EVENT'
+            );
+            const sheetRowWarnings = clientWarnings.filter(
+              (w) => w.code === 'CORRUPTED_SHEET_ROW'
+            );
+            const missingCalendarInstallmentIds = new Set(
+              calendarWarnings
+                .map((w) => w.installmentId)
+                .filter((id): id is string => Boolean(id))
+            );
             const situacaoColor =
               totals.situacao === 'Com atraso'
                 ? 'text-red-700'
@@ -505,6 +652,50 @@ export const ClientsView: React.FC<ClientsViewProps> = ({
                             </a>
                           )}
                         </p>
+                      )}
+                      {clientWarnings.length > 0 && (
+                        <div
+                          data-testid={`client-sync-warnings-${client.id}`}
+                          className="flex flex-wrap items-center gap-1.5 pt-1"
+                        >
+                          {driveWarning && (
+                            <span
+                              title={driveWarning.message}
+                              className="inline-flex items-center gap-1 rounded border border-amber-700/25 bg-amber-50 px-2 py-0.5 text-[10px] font-medium text-amber-900"
+                            >
+                              <FolderOpen className="h-3 w-3 text-amber-700" />
+                              {driveWarning.code === 'INVALID_DRIVE_URL'
+                                ? 'Link do Drive inválido'
+                                : 'Sem pasta no Drive'}
+                            </span>
+                          )}
+                          {calendarWarnings.length > 0 && (
+                            <span
+                              title={calendarWarnings
+                                .map((w) => w.message)
+                                .join(' | ')}
+                              className="inline-flex items-center gap-1 rounded border border-amber-700/25 bg-amber-50 px-2 py-0.5 text-[10px] font-medium text-amber-900 tabular-nums"
+                            >
+                              <CalendarDays className="h-3 w-3 text-amber-700" />
+                              {calendarWarnings.length === 1
+                                ? '1 parcela sem evento no Calendar'
+                                : `${calendarWarnings.length} parcelas sem evento no Calendar`}
+                            </span>
+                          )}
+                          {sheetRowWarnings.length > 0 && (
+                            <span
+                              title={sheetRowWarnings
+                                .map((w) => w.message)
+                                .join(' | ')}
+                              className="inline-flex items-center gap-1 rounded border border-red-700/25 bg-red-50 px-2 py-0.5 text-[10px] font-medium text-red-900 tabular-nums"
+                            >
+                              <AlertTriangle className="h-3 w-3 text-red-700" />
+                              {sheetRowWarnings.length === 1
+                                ? '1 linha com erro na planilha'
+                                : `${sheetRowWarnings.length} linhas com erro na planilha`}
+                            </span>
+                          )}
+                        </div>
                       )}
                     </div>
 
@@ -716,7 +907,18 @@ export const ClientsView: React.FC<ClientsViewProps> = ({
                                     {inst.totalInstallments}
                                   </td>
                                   <td className="py-2.5 pr-4 text-[#313131]/80 tabular-nums">
-                                    {formatDateBR(inst.dueDate)}
+                                    <span>{formatDateBR(inst.dueDate)}</span>
+                                    {missingCalendarInstallmentIds.has(
+                                      inst.id
+                                    ) && (
+                                      <span
+                                        title="Parcela pendente na planilha sem evento correspondente no Google Calendar."
+                                        className="ml-2 inline-flex items-center gap-1 rounded border border-amber-700/25 bg-amber-50 px-1.5 py-0.5 text-[10px] font-medium text-amber-900"
+                                      >
+                                        <CalendarDays className="h-2.5 w-2.5 text-amber-700" />
+                                        Sem evento no Calendar
+                                      </span>
+                                    )}
                                   </td>
                                   <td className="py-2.5 pr-4 font-medium text-[#313131] tabular-nums">
                                     {formatCurrencyBRL(inst.amount)}

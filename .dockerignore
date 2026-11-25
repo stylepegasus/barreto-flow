@@ -1,0 +1,39 @@
+# Version control & IDE metadata
+.git
+.gitignore
+.github
+.vscode
+.idea
+
+# AI Studio & automated browser artifacts
+.aistudio
+.playwright-cli
+
+# Dependencies & build outputs (generated cleanly inside Docker)
+node_modules
+dist
+server.js
+
+# Environment secrets (never bake into image; keep .env.example as template)
+.env
+.env.*
+!.env.example
+
+# Automated tests & coverage
+**/*.test.ts
+**/*.test.tsx
+**/*.spec.ts
+**/*.spec.tsx
+coverage
+
+# Debug logs, screenshots, and temporary files
+*.log
+npm-debug.log*
+*.tmp
+*.png
+*.jpg
+*.jpeg
+*.webm
+!public/**
+.DS_Store
+Thumbs.db
