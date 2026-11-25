@@ -6,6 +6,11 @@ import { fileURLToPath } from 'url';
 import { GoogleGenAI } from '@google/genai';
 import type { Content, Part } from '@google/genai';
 import { verifyFirebaseIdTokenAndAllowlist } from './src/utils/serverAuth.ts';
+import { buildDonaSystemPrompt } from './src/utils/assistantContext.ts';
+import {
+  isExcludedZapSignFolder,
+  normalizeZapSignDocsPayload,
+} from './src/utils/zapsignLogic.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -93,30 +98,6 @@ function getGeminiClient(): GoogleGenAI {
       },
     },
   });
-}
-
-function buildSystemInstruction(portfolioContext: string): string {
-  return [
-    'Você é Mike Ross, o Assistente Barreto da Barreto Advocacia Especializada (especializada em Direito de Família).',
-    'Atue como um assistente jurídico-financeiro ágil, preciso, claro e cordial, falando em português do Brasil (pt-BR), sem jargões técnicos desnecessários.',
-    '',
-    'REGRAS IMPORTANTES:',
-    '1. O sistema está operando em MODO SOMENTE LEITURA. Nunca afirme que já alterou a planilha oficial ou o Google Calendar; em vez disso, indique com clareza quais linhas/colunas da planilha ou evento na agenda (horário padrão 13h30 às 14h30) devem ser atualizados pela equipe.',
-    '2. Ao gerar mensagens de cobrança para WhatsApp, mantenha tom humano, respeitoso e firme na medida certa, e inclua a chave PIX oficial do escritório: barretoadvocacia01@gmail.com quando aplicável.',
-    '3. Ao analisar contratos, procurações, decisões ou protocolos anexados, extraia objetivamente em tópicos:',
-    '   - Número do processo e objeto do contrato / tipo de ação;',
-    '   - Datas importantes (assinatura, protocolo, decisão, audiência ou prazos);',
-    '   - Valores de honorários (total contratado, entrada, parcelas e percentual de êxito);',
-    '   - Regras de vencimento e forma de pagamento;',
-    '   - Sugestões práticas do que atualizar na planilha "Barreto — Honorários (Ads Família)" ou na agenda.',
-    '4. Quando o usuário perguntar sobre metas, projeções ou ROI de Tráfego Pago, compare a meta do mês com o Previsto/Recebido na planilha e os dados do Simulador (investimento, CPL, conversão, ticket médio, inadimplência e ROI), calculando quantos contratos ainda faltam fechar para bater a meta.',
-    '5. Quando o usuário pedir auditoria ZapSign × Planilha, cruze os documentos assinados do ZapSign recebidos no contexto com os clientes e parcelas da planilha, destacando exatamente quem assinou no ZapSign mas ainda falta cadastrar na planilha ou está sem parcelas confirmadas.',
-    '6. Responda de forma bem estruturada, concisa e com valores sempre formatados em R$ (padrão brasileiro) e datas em DD/MM/AAAA.',
-    '',
-    portfolioContext
-      ? `CONTEXTO ATUAL DA CARTEIRA CARREGADA NO PAINEL:\n${portfolioContext}`
-      : 'Nenhum dado adicional da carteira foi enviado nesta chamada.',
-  ].join('\n');
 }
 
 function buildContents(
@@ -236,7 +217,7 @@ async function startServer() {
       const response = await generateWithFallback(
         ai,
         contents,
-        buildSystemInstruction(portfolioContext)
+        buildDonaSystemPrompt(portfolioContext)
       );
 
       const reply = response.text?.trim();
@@ -251,27 +232,28 @@ async function startServer() {
     } catch (err: unknown) {
       const errMsg =
         err instanceof Error ? err.message : 'Erro inesperado ao consultar o Gemini.';
-      const status =
-        errMsg.includes('GEMINI_API_KEY')
-          ? 500
-          : errMsg.includes('429') || errMsg.includes('RESOURCE_EXHAUSTED')
-            ? 429
-            : isTransientUnavailableError(err)
-              ? 503
-              : errMsg.includes('403') || errMsg.includes('PERMISSION_DENIED')
-                ? 403
-                : 500;
+      const isMissingKey = errMsg.includes('GEMINI_API_KEY');
+      const status = isMissingKey
+        ? 503
+        : errMsg.includes('429') || errMsg.includes('RESOURCE_EXHAUSTED')
+          ? 429
+          : isTransientUnavailableError(err)
+            ? 503
+            : errMsg.includes('403') || errMsg.includes('PERMISSION_DENIED')
+              ? 403
+              : 500;
 
-      console.error('[Assistente Barreto] Erro Gemini API:', errMsg);
+      console.error('[Dona · Barreto Flow] Erro Gemini API:', errMsg);
       res.status(status).json({
-        error:
-          status === 429
+        error: isMissingKey
+          ? 'A Dona está indisponível porque a chave de IA (GEMINI_API_KEY) ainda não foi configurada no ambiente do servidor.'
+          : status === 429
             ? 'Limite temporário de requisições da API Gemini atingido. Aguarde alguns segundos e tente novamente.'
             : status === 503
-              ? 'O modelo de IA está temporariamente sobrecarregado. Aguarde alguns segundos e tente novamente.'
+              ? 'O serviço de IA está temporariamente sobrecarregado. Aguarde alguns segundos e tente novamente.'
               : status === 403
-                ? 'Permissão negada ou chave da API Gemini inválida nas configurações do projeto.'
-                : 'Não foi possível concluir a análise com a IA neste momento. Tente novamente em instantes.',
+                ? 'Permissão negada ou chave da API Gemini inválida nas configurações do ambiente.'
+                : 'A Dona não conseguiu concluir a análise neste momento. Tente novamente em instantes.',
       });
     }
   });
@@ -288,20 +270,7 @@ async function startServer() {
     }
 
     try {
-      const signedDocs: Array<{
-        token: string;
-        name: string;
-        status: 'signed';
-        createdAt: string;
-        signedAt: string;
-        signedFileUrl?: string;
-        signers: Array<{
-          name: string;
-          email?: string;
-          phone?: string;
-          signedAt?: string;
-        }>;
-      }> = [];
+      const signedDocs: ReturnType<typeof normalizeZapSignDocsPayload> = [];
 
       let nextUrl: string | null = 'https://api.zapsign.com.br/api/v1/docs/';
       let pageCount = 0;
@@ -342,62 +311,10 @@ async function startServer() {
             ? payload.results
             : [];
 
-        for (const item of rawItems) {
-          const docStatus = String(item.status ?? '')
-            .trim()
-            .toLowerCase();
-          if (docStatus !== 'signed') continue;
-
-          const docToken = String(item.token ?? '').trim();
-          const docName = String(item.name ?? '').trim();
-          if (!docToken || !docName) continue;
-
-          const rawSigners = Array.isArray(item.signers)
-            ? (item.signers as Array<Record<string, unknown>>)
-            : [];
-
-          const signers = rawSigners
-            .map((s) => {
-              const phoneNum = String(s.phone_number ?? '').trim();
-              const phoneCountry = String(s.phone_country ?? '').replace(/\D/g, '');
-              const phone = phoneNum
-                ? phoneCountry
-                  ? `+${phoneCountry} ${phoneNum}`
-                  : phoneNum
-                : undefined;
-              return {
-                name: String(s.name ?? '').trim(),
-                email: String(s.email ?? '').trim() || undefined,
-                phone,
-                signedAt: String(s.signed_at ?? '').trim() || undefined,
-              };
-            })
-            .filter((s) => Boolean(s.name));
-
-          const latestSignerDate = signers
-            .map((s) => s.signedAt)
-            .filter((d): d is string => Boolean(d))
-            .sort()
-            .pop();
-
-          const createdAt = String(item.created_at ?? '').trim();
-          const signedAt =
-            latestSignerDate ||
-            String(item.last_update_at ?? '').trim() ||
-            createdAt;
-          const signedFileUrl =
-            String(item.signed_file ?? '').trim() || undefined;
-
-          signedDocs.push({
-            token: docToken,
-            name: docName,
-            status: 'signed',
-            createdAt,
-            signedAt,
-            signedFileUrl,
-            signers,
-          });
-        }
+        const normalizedPage = normalizeZapSignDocsPayload(rawItems).filter(
+          (doc) => !isExcludedZapSignFolder(doc.folderPath, doc.folderName)
+        );
+        signedDocs.push(...normalizedPage);
 
         nextUrl =
           !Array.isArray(payload) && typeof payload.next === 'string' && payload.next

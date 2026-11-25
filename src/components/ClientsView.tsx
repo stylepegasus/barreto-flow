@@ -1,6 +1,7 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   CalendarClock,
+  CalendarDays,
   CheckCircle2,
   ChevronDown,
   ChevronUp,
@@ -11,6 +12,7 @@ import {
   RefreshCw,
   Search,
   Sparkles,
+  UserPlus,
 } from 'lucide-react';
 import {
   ClientCase,
@@ -43,10 +45,18 @@ interface ClientsViewProps {
   matchedZapSignByClientId?: Record<string, ZapSignSignedDoc[]>;
   unmatchedZapSignDocs?: ZapSignSignedDoc[];
   unmatchedZapSignItems?: ZapSignCrossReferenceItem[];
+  proceduralZapSignCount?: number;
   onRefreshZapSign?: () => void;
+  onPrefillZapSignItem?: (item: ZapSignCrossReferenceItem) => void;
   onQuitarParcela: (item: InstallmentWithStatus) => void;
   onAlterarData: (item: InstallmentWithStatus) => void;
   onAnalyzeDocument: (client: ClientCase, file: DriveFileItem) => void;
+  onSessionContextChange?: (ctx: {
+    search: string;
+    stage: DriveStage | 'Todas';
+    modality: PaymentModality | 'Todas';
+    focusedClientName: string | null;
+  }) => void;
 }
 
 function formatDriveMimeLabel(mimeType: string): string {
@@ -81,10 +91,13 @@ export const ClientsView: React.FC<ClientsViewProps> = ({
   matchedZapSignByClientId,
   unmatchedZapSignDocs = [],
   unmatchedZapSignItems,
+  proceduralZapSignCount = 0,
   onRefreshZapSign,
+  onPrefillZapSignItem,
   onQuitarParcela,
   onAlterarData,
   onAnalyzeDocument,
+  onSessionContextChange,
 }) => {
   const [search, setSearch] = useState('');
   const [stageFilter, setStageFilter] = useState<DriveStage | 'Todas'>('Todas');
@@ -96,6 +109,28 @@ export const ClientsView: React.FC<ClientsViewProps> = ({
     string | null
   >(null);
   const [zapSignExpanded, setZapSignExpanded] = useState(false);
+
+  useEffect(() => {
+    if (!onSessionContextChange) return;
+    const focusedId = expandedClientId ?? expandedDocsClientId;
+    const focusedClient = focusedId
+      ? clients.find((c) => c.id === focusedId)
+      : undefined;
+    onSessionContextChange({
+      search,
+      stage: stageFilter,
+      modality: modalityFilter,
+      focusedClientName: focusedClient?.fullName ?? null,
+    });
+  }, [
+    search,
+    stageFilter,
+    modalityFilter,
+    expandedClientId,
+    expandedDocsClientId,
+    clients,
+    onSessionContextChange,
+  ]);
 
   const auditItems: ZapSignCrossReferenceItem[] =
     unmatchedZapSignItems ??
@@ -162,7 +197,7 @@ export const ClientsView: React.FC<ClientsViewProps> = ({
         </div>
       </div>
 
-      {/* Discrete ZapSign Audit Banner (only signed contracts missing from spreadsheet, excluding ZZ - Encerrados) */}
+      {/* Discrete ZapSign Audit Banner (only active contracts missing from spreadsheet, excluding ignored folders) */}
       {auditItems.length > 0 && (
         <div
           data-testid="zapsign-unmatched-banner"
@@ -179,8 +214,13 @@ export const ClientsView: React.FC<ClientsViewProps> = ({
                     : 'contratos assinados no ZapSign sem cadastro na planilha'}
                 </h2>
                 <p className="mt-0.5 text-xs text-[#313131]/70">
-                  Cruzamento ZapSign × Planilha × Google Drive (somente status Assinado,
-                  excluindo pastas em ZZ - Encerrados).
+                  Coligação ZapSign × Planilha × Google Drive × Google Calendar
+                  (somente status Assinado, excluindo pastas ZZ - Encerrados,
+                  Docs Faltavam e Fechados do Escritório
+                  {proceduralZapSignCount > 0
+                    ? `; ${proceduralZapSignCount} documento(s) processuais separados`
+                    : ''}
+                  ).
                 </p>
               </div>
             </div>
@@ -206,51 +246,88 @@ export const ClientsView: React.FC<ClientsViewProps> = ({
           </div>
 
           {zapSignExpanded && (
-            <ul className="max-h-72 overflow-y-auto divide-y divide-[#313131]/10 rounded-lg border border-[#313131]/10 bg-[#F6F3EC]/60">
+            <ul className="max-h-80 overflow-y-auto divide-y divide-[#313131]/10 rounded-lg border border-[#313131]/10 bg-[#F6F3EC]/60">
               {auditItems.map((item) => {
                 const doc = item.doc;
                 const signedDateLabel = formatZapSignDateBR(doc.signedAt);
+                const cleanName =
+                  item.extractedProfile?.cleanName || item.primarySignerName;
+                const cpfLabel = item.extractedProfile?.cpf;
+                const phoneLabel = item.extractedProfile?.phone;
                 return (
                   <li
                     key={doc.token}
-                    className="flex flex-col gap-1.5 px-3.5 py-2.5 text-xs sm:flex-row sm:items-center sm:justify-between"
+                    className="flex flex-col gap-2 px-3.5 py-3 text-xs sm:flex-row sm:items-center sm:justify-between"
                   >
-                    <div className="min-w-0">
-                      <p className="font-semibold text-[#313131]">
-                        {item.primarySignerName}
-                      </p>
+                    <div className="min-w-0 space-y-1">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <p className="font-semibold text-[#313131]">
+                          {cleanName}
+                        </p>
+                        {cpfLabel && (
+                          <span className="text-[10px] text-[#313131]/65 tabular-nums">
+                            CPF {cpfLabel}
+                          </span>
+                        )}
+                        {phoneLabel && (
+                          <span className="text-[10px] text-[#313131]/65 tabular-nums">
+                            · {phoneLabel}
+                          </span>
+                        )}
+                        {signedDateLabel && (
+                          <span className="text-[10px] text-[#313131]/65 tabular-nums">
+                            · Assinado em {signedDateLabel}
+                          </span>
+                        )}
+                      </div>
                       <p className="text-[11px] text-[#313131]/65 truncate">
                         Documento: {doc.name}
                       </p>
+                      <div className="flex flex-wrap items-center gap-1.5 pt-0.5">
+                        {item.driveFolder ? (
+                          <a
+                            href={item.driveFolder.urlPasta}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="inline-flex items-center gap-1 rounded border border-[#DCB14A]/70 bg-white px-2 py-0.5 text-[10px] font-medium text-[#313131] hover:border-[#8D6A14]"
+                          >
+                            <FolderOpen className="h-3 w-3 text-[#8D6A14]" />
+                            Pasta Drive encontrada ({item.driveFolder.etapa})
+                            <ExternalLink className="h-2.5 w-2.5 opacity-60" />
+                          </a>
+                        ) : (
+                          <span className="inline-flex items-center rounded border border-[#313131]/15 bg-white/70 px-2 py-0.5 text-[10px] text-[#313131]/60">
+                            Sem pasta no Drive
+                          </span>
+                        )}
+                        {item.calendarMatch && (
+                          <span className="inline-flex items-center gap-1 rounded border border-emerald-700/30 bg-emerald-50 px-2 py-0.5 text-[10px] font-medium text-emerald-900">
+                            <CalendarDays className="h-3 w-3 text-emerald-700" />
+                            Evento no Calendar ({item.calendarMatch.eventCount})
+                          </span>
+                        )}
+                        <span className="inline-flex items-center rounded border border-amber-700/25 bg-amber-50 px-2 py-0.5 text-[10px] font-medium text-amber-900">
+                          Não encontrado na planilha
+                        </span>
+                      </div>
                     </div>
-                    <div className="flex flex-wrap items-center gap-3 shrink-0 tabular-nums">
-                      {signedDateLabel && (
-                        <span className="text-[11px] text-[#313131]/70">
-                          Assinado em {signedDateLabel}
-                        </span>
-                      )}
-                      {item.driveFolder ? (
-                        <a
-                          href={item.driveFolder.urlPasta}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="inline-flex items-center gap-1 rounded border border-[#DCB14A]/60 bg-white px-2 py-0.5 text-[11px] font-medium text-[#313131] hover:border-[#8D6A14]"
+                    <div className="flex flex-wrap items-center gap-2 shrink-0">
+                      {onPrefillZapSignItem && (
+                        <button
+                          type="button"
+                          onClick={() => onPrefillZapSignItem(item)}
+                          className="inline-flex items-center gap-1 rounded-md bg-[#313131] px-2.5 py-1 text-[11px] font-medium text-[#FFD559] hover:bg-[#313131]/90 whitespace-nowrap"
                         >
-                          <FolderOpen className="h-3 w-3 text-[#8D6A14]" />
-                          Pasta no Drive ({item.driveFolder.etapa})
-                          <ExternalLink className="h-2.5 w-2.5 opacity-60" />
-                        </a>
-                      ) : (
-                        <span className="text-[11px] text-[#313131]/55">
-                          Sem pasta no Drive
-                        </span>
+                          <UserPlus className="h-3 w-3" />
+                          Pré-preencher cadastro
+                        </button>
                       )}
                       {doc.signedFileUrl && (
                         <a
                           href={doc.signedFileUrl}
                           target="_blank"
                           rel="noopener noreferrer"
-                          className="inline-flex items-center gap-1 text-[11px] font-semibold text-[#8D6A14] hover:underline"
+                          className="inline-flex items-center gap-1 rounded-md border border-[#313131]/20 bg-white px-2.5 py-1 text-[11px] font-medium text-[#8D6A14] hover:border-[#DCB14A] whitespace-nowrap"
                         >
                           Ver PDF
                           <ExternalLink className="h-3 w-3" />
@@ -572,10 +649,11 @@ export const ClientsView: React.FC<ClientsViewProps> = ({
                                 <button
                                   type="button"
                                   onClick={() => onAnalyzeDocument(client, file)}
+                                  aria-label={`Analisar ${file.nome} com a Dona`}
                                   className="inline-flex items-center gap-1.5 rounded-md bg-[#313131] px-2.5 py-1.5 text-[11px] font-medium text-white hover:bg-[#313131]/90 whitespace-nowrap"
                                 >
                                   <Sparkles className="h-3 w-3 text-[#DCB14A]" />
-                                  Analisar com IA
+                                  Analisar com a Dona
                                 </button>
                               </div>
                             </li>

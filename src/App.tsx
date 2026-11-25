@@ -19,6 +19,7 @@ import {
   SimulatorPresetId,
   SyncConfig,
   WorkspaceArchitectureSnapshot,
+  ZapSignCrossReferenceItem,
   ZapSignSignedDoc,
   ZapSignState,
 } from './types/honorarios';
@@ -73,11 +74,16 @@ import {
   AssistantChatWidget,
   PendingDocumentAnalysisRequest,
 } from './components/AssistantChatWidget';
+import {
+  ZapSignPrefilledClientDraft,
+  ZapSignRegistrationModal,
+} from './components/ZapSignRegistrationModal';
 
 const STORAGE_CONFIG_KEY = 'barreto_honorarios_config_v1';
 const STORAGE_DEMO_CLIENTS_KEY = 'barreto_honorarios_demo_clients_v1';
 const STORAGE_GOALS_KEY = 'barreto_honorarios_goals_v1';
 const STORAGE_SIMULATOR_KEY = 'barreto_honorarios_simulator_v1';
+const STORAGE_ZAPSIGN_LINKS_KEY = 'barreto_honorarios_zapsign_links_v1';
 
 interface PendingConfirmAction {
   type: 'pay' | 'reschedule';
@@ -186,8 +192,37 @@ export default function App() {
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
   const [pendingDocumentRequest, setPendingDocumentRequest] =
     useState<PendingDocumentAnalysisRequest | null>(null);
+  const [zapSignPrefillItem, setZapSignPrefillItem] =
+    useState<ZapSignCrossReferenceItem | null>(null);
+  const [manualZapSignLinks, setManualZapSignLinks] = useState<
+    Record<string, string>
+  >(() => {
+    try {
+      const saved = localStorage.getItem(STORAGE_ZAPSIGN_LINKS_KEY);
+      if (saved) {
+        const parsed = JSON.parse(saved) as Record<string, string>;
+        if (parsed && typeof parsed === 'object') return parsed;
+      }
+    } catch {
+      // ignore storage errors
+    }
+    return {};
+  });
 
   const currentMonthKey = todayISO.slice(0, 7);
+  const [dashboardSelectedMonthKey, setDashboardSelectedMonthKey] =
+    useState<string>(currentMonthKey);
+  const [clientsSessionContext, setClientsSessionContext] = useState<{
+    search: string;
+    stage: string;
+    modality: string;
+    focusedClientName: string | null;
+  }>({
+    search: '',
+    stage: 'Todas',
+    modality: 'Todas',
+    focusedClientName: null,
+  });
 
   const baseline = useMemo(
     () => computePortfolioBaseline(clients, todayISO),
@@ -284,6 +319,17 @@ export default function App() {
       // ignore storage errors
     }
   }, [activePreset, simulatorInputs]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(
+        STORAGE_ZAPSIGN_LINKS_KEY,
+        JSON.stringify(manualZapSignLinks)
+      );
+    } catch {
+      // ignore storage errors
+    }
+  }, [manualZapSignLinks]);
 
   useEffect(() => {
     if (config.sourceMode === 'demo') {
@@ -822,13 +868,122 @@ export default function App() {
     ]
   );
 
-  const zapSignMatchResult = useMemo(
-    () => matchZapSignToClients(clients, zapSignState.docs, driveEtapas),
-    [clients, zapSignState.docs, driveEtapas]
-  );
+  const zapSignMatchResult = useMemo(() => {
+    const base = matchZapSignToClients(
+      clients,
+      zapSignState.docs,
+      driveEtapas,
+      calendarEvents
+    );
+
+    const hasManualLinks = Object.keys(manualZapSignLinks).length > 0;
+    if (!hasManualLinks) return base;
+
+    const clientById = new Map(clients.map((c) => [c.id, c]));
+    const matchedByClientId: Record<string, ZapSignSignedDoc[]> = {
+      ...base.matchedByClientId,
+    };
+    const remainingAuditItems: ZapSignCrossReferenceItem[] = [];
+    const remainingDocs: ZapSignSignedDoc[] = [];
+
+    for (const item of base.unmatchedAuditItems) {
+      const linkedClientId = manualZapSignLinks[item.doc.token];
+      const linkedClient = linkedClientId
+        ? clientById.get(linkedClientId)
+        : undefined;
+      if (linkedClient) {
+        const list = matchedByClientId[linkedClient.id]
+          ? [...matchedByClientId[linkedClient.id]]
+          : [];
+        if (!list.some((d) => d.token === item.doc.token)) {
+          list.push(item.doc);
+        }
+        matchedByClientId[linkedClient.id] = list;
+      } else {
+        remainingAuditItems.push(item);
+        remainingDocs.push(item.doc);
+      }
+    }
+
+    return {
+      ...base,
+      matchedByClientId,
+      unmatchedAuditItems: remainingAuditItems,
+      unmatchedDocs: remainingDocs,
+    };
+  }, [clients, zapSignState.docs, driveEtapas, calendarEvents, manualZapSignLinks]);
+
+  const handleCreateClientFromZapSign = (draft: ZapSignPrefilledClientDraft) => {
+    const newId = `zapsign-cli-${Date.now()}`;
+    const newClient: ClientCase = {
+      id: newId,
+      fullName: draft.fullName,
+      cpf: draft.cpf,
+      phone: draft.phone,
+      caseType: draft.caseType,
+      driveStage: draft.driveStage,
+      driveFolderUrl: draft.driveFolderUrl,
+      modality: draft.modality,
+      contractedTotal: draft.contractedTotal,
+      notes: `Pré-cadastrado via ZapSign (assinado em ${draft.signedAt.slice(0, 10)})`,
+      installments: [],
+    };
+    setClients((prev) => [newClient, ...prev]);
+    setManualZapSignLinks((prev) => ({ ...prev, [draft.docToken]: newId }));
+    setZapSignPrefillItem(null);
+    showToast(
+      config.readOnlyMode && config.sourceMode !== 'demo'
+        ? `Cliente "${draft.fullName}" pré-cadastrado na sessão do painel (planilha oficial intacta).`
+        : `Cliente "${draft.fullName}" adicionado ao painel a partir do ZapSign.`
+    );
+  };
+
+  const handleLinkZapSignToExistingClient = (
+    docToken: string,
+    clientId: string
+  ) => {
+    const target = clients.find((c) => c.id === clientId);
+    setManualZapSignLinks((prev) => ({ ...prev, [docToken]: clientId }));
+    setZapSignPrefillItem(null);
+    showToast(
+      target
+        ? `Contrato ZapSign vinculado a "${target.fullName}" na auditoria.`
+        : 'Contrato ZapSign vinculado à cliente selecionada.'
+    );
+  };
+
+  const focusedInstallmentItem =
+    whatsAppItem ?? rescheduleItem ?? pendingConfirm?.item ?? null;
 
   const assistantContextExtras: AssistantContextExtras = useMemo(
     () => ({
+      activeTab,
+      selectedMonthKey:
+        activeTab === 'dashboard' ? dashboardSelectedMonthKey : currentMonthKey,
+      sourceMode: config.sourceMode,
+      readOnlyMode: config.readOnlyMode,
+      activeFilters:
+        activeTab === 'clientes'
+          ? {
+              search: clientsSessionContext.search,
+              stage: clientsSessionContext.stage,
+              modality: clientsSessionContext.modality,
+            }
+          : undefined,
+      focusedClientName:
+        activeTab === 'clientes'
+          ? clientsSessionContext.focusedClientName
+          : null,
+      focusedInstallment: focusedInstallmentItem
+        ? {
+            clientName: focusedInstallmentItem.clientName,
+            installmentNumber: focusedInstallmentItem.installmentNumber,
+            totalInstallments: focusedInstallmentItem.totalInstallments,
+            amount: focusedInstallmentItem.amount,
+            dueDate: focusedInstallmentItem.dueDate,
+            status: focusedInstallmentItem.status,
+          }
+        : null,
       goalsByMonth,
       defaultGoal: DEFAULT_MONTHLY_GOAL,
       simulatorInputs,
@@ -838,6 +993,13 @@ export default function App() {
       unmatchedZapSignItems: zapSignMatchResult.unmatchedAuditItems,
     }),
     [
+      activeTab,
+      dashboardSelectedMonthKey,
+      currentMonthKey,
+      config.sourceMode,
+      config.readOnlyMode,
+      clientsSessionContext,
+      focusedInstallmentItem,
       goalsByMonth,
       simulatorInputs,
       simulatorOutputs,
@@ -1005,10 +1167,15 @@ export default function App() {
               todayISO={todayISO}
               unmatchedZapSignDocs={zapSignMatchResult.unmatchedDocs}
               unmatchedZapSignItems={zapSignMatchResult.unmatchedAuditItems}
+              proceduralZapSignCount={
+                zapSignMatchResult.proceduralAuditItems.length
+              }
               zapSignSignedCount={zapSignState.docs.length}
               onMarkPaid={requestMarkPaid}
               onOpenWhatsApp={setWhatsAppItem}
               onNavigateTab={(tab) => setActiveTab(tab)}
+              onSelectedMonthChange={setDashboardSelectedMonthKey}
+              onPrefillZapSignItem={setZapSignPrefillItem}
             />
           )}
 
@@ -1048,10 +1215,15 @@ export default function App() {
               matchedZapSignByClientId={zapSignMatchResult.matchedByClientId}
               unmatchedZapSignDocs={zapSignMatchResult.unmatchedDocs}
               unmatchedZapSignItems={zapSignMatchResult.unmatchedAuditItems}
+              proceduralZapSignCount={
+                zapSignMatchResult.proceduralAuditItems.length
+              }
               onRefreshZapSign={fetchZapSignSigned}
+              onPrefillZapSignItem={setZapSignPrefillItem}
               onQuitarParcela={requestMarkPaid}
               onAlterarData={setRescheduleItem}
               onAnalyzeDocument={handleAnalyzeDocument}
+              onSessionContextChange={setClientsSessionContext}
             />
           )}
 
@@ -1134,7 +1306,17 @@ export default function App() {
         onCancel={() => setPendingConfirm(null)}
       />
 
-      {/* Mike Ross — Assistente Barreto (Gemini) */}
+      {/* ZapSign Pre-fill & Linking Modal */}
+      <ZapSignRegistrationModal
+        item={zapSignPrefillItem}
+        existingClients={clients}
+        readOnlyMode={config.readOnlyMode && config.sourceMode !== 'demo'}
+        onCreateClientFromZapSign={handleCreateClientFromZapSign}
+        onLinkToExistingClient={handleLinkZapSignToExistingClient}
+        onClose={() => setZapSignPrefillItem(null)}
+      />
+
+      {/* Dona — Assistente Operacional e Financeira do Barreto Flow (Gemini) */}
       <AssistantChatWidget
         isOpen={chatOpen}
         onOpenChange={setChatOpen}

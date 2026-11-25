@@ -3,6 +3,7 @@ import {
   AlertCircle,
   BadgeCheck,
   CalendarClock,
+  CalendarDays,
   CheckCircle2,
   ChevronDown,
   ChevronUp,
@@ -12,6 +13,7 @@ import {
   MessageCircle,
   Receipt,
   TrendingUp,
+  UserPlus,
   Wallet,
 } from 'lucide-react';
 import {
@@ -39,10 +41,13 @@ interface DashboardViewProps {
   todayISO: string;
   unmatchedZapSignDocs?: ZapSignSignedDoc[];
   unmatchedZapSignItems?: ZapSignCrossReferenceItem[];
+  proceduralZapSignCount?: number;
   zapSignSignedCount?: number;
   onMarkPaid: (item: InstallmentWithStatus) => void;
   onOpenWhatsApp: (item: InstallmentWithStatus) => void;
   onNavigateTab: (tab: 'calendario' | 'clientes' | 'metas') => void;
+  onSelectedMonthChange?: (monthKey: string) => void;
+  onPrefillZapSignItem?: (item: ZapSignCrossReferenceItem) => void;
 }
 
 interface KpiInfoTooltipProps {
@@ -107,13 +112,20 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
   todayISO,
   unmatchedZapSignDocs = [],
   unmatchedZapSignItems,
+  proceduralZapSignCount = 0,
   onMarkPaid,
   onOpenWhatsApp,
   onNavigateTab,
+  onSelectedMonthChange,
+  onPrefillZapSignItem,
 }) => {
   const defaultMonthKey = todayISO.slice(0, 7);
   const [selectedMonthKey, setSelectedMonthKey] =
     useState<string>(defaultMonthKey);
+
+  useEffect(() => {
+    onSelectedMonthChange?.(selectedMonthKey);
+  }, [selectedMonthKey, onSelectedMonthChange]);
   const [hoveredMonthKey, setHoveredMonthKey] = useState<string | null>(null);
   const [hoveredTooltipId, setHoveredTooltipId] = useState<string | null>(null);
   const [pinnedTooltipId, setPinnedTooltipId] = useState<string | null>(null);
@@ -236,8 +248,8 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
           className="rounded-xl border border-[#DCB14A] bg-white px-4 py-3 text-xs text-[#313131] space-y-3"
         >
           <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-            <div className="flex items-center gap-2.5">
-              <FileSignature className="h-4 w-4 shrink-0 text-[#8D6A14]" />
+            <div className="flex items-start gap-2.5">
+              <FileSignature className="mt-0.5 h-4 w-4 shrink-0 text-[#8D6A14]" />
               <span>
                 <strong className="font-semibold">
                   {auditItems.length}{' '}
@@ -245,7 +257,12 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                     ? 'contrato assinado no ZapSign'
                     : 'contratos assinados no ZapSign'}
                 </strong>{' '}
-                ainda não constam na planilha de honorários (excluindo ZZ - Encerrados).
+                ainda não constam na planilha de honorários (excluindo pastas ZZ -
+                Encerrados, Docs Faltavam e Fechados do Escritório
+                {proceduralZapSignCount > 0
+                  ? `; ${proceduralZapSignCount} doc(s) processuais separados`
+                  : ''}
+                ).
               </span>
             </div>
             <div className="flex flex-wrap items-center gap-3 shrink-0">
@@ -278,50 +295,81 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
           </div>
 
           {zapSignExpanded && (
-            <ul className="max-h-64 overflow-y-auto divide-y divide-[#313131]/10 rounded-lg border border-[#313131]/10 bg-[#F6F3EC]/60">
+            <ul className="max-h-72 overflow-y-auto divide-y divide-[#313131]/10 rounded-lg border border-[#313131]/10 bg-[#F6F3EC]/60">
               {auditItems.map((item) => {
                 const signedDateLabel = formatZapSignDateBR(item.doc.signedAt);
+                const cleanName =
+                  item.extractedProfile?.cleanName || item.primarySignerName;
+                const cpfLabel = item.extractedProfile?.cpf;
                 return (
                   <li
                     key={item.doc.token}
-                    className="flex flex-col gap-1.5 px-3.5 py-2.5 text-xs sm:flex-row sm:items-center sm:justify-between"
+                    className="flex flex-col gap-2 px-3.5 py-2.5 text-xs sm:flex-row sm:items-center sm:justify-between"
                   >
-                    <div className="min-w-0">
-                      <p className="font-semibold text-[#313131]">
-                        {item.primarySignerName}
-                      </p>
+                    <div className="min-w-0 space-y-1">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <p className="font-semibold text-[#313131]">
+                          {cleanName}
+                        </p>
+                        {cpfLabel && (
+                          <span className="text-[10px] text-[#313131]/60 tabular-nums">
+                            CPF {cpfLabel}
+                          </span>
+                        )}
+                        {signedDateLabel && (
+                          <span className="text-[10px] text-[#313131]/60 tabular-nums">
+                            · Assinado em {signedDateLabel}
+                          </span>
+                        )}
+                      </div>
                       <p className="text-[11px] text-[#313131]/65 truncate">
                         Documento: {item.doc.name}
                       </p>
+                      <div className="flex flex-wrap items-center gap-1.5 pt-0.5">
+                        {item.driveFolder ? (
+                          <a
+                            href={item.driveFolder.urlPasta}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="inline-flex items-center gap-1 rounded border border-[#DCB14A]/70 bg-white px-2 py-0.5 text-[10px] font-medium text-[#313131] hover:border-[#8D6A14]"
+                          >
+                            <FolderOpen className="h-3 w-3 text-[#8D6A14]" />
+                            Pasta Drive encontrada ({item.driveFolder.etapa})
+                            <ExternalLink className="h-2.5 w-2.5 opacity-60" />
+                          </a>
+                        ) : (
+                          <span className="inline-flex items-center rounded border border-[#313131]/15 bg-white/70 px-2 py-0.5 text-[10px] text-[#313131]/60">
+                            Sem pasta no Drive
+                          </span>
+                        )}
+                        {item.calendarMatch && (
+                          <span className="inline-flex items-center gap-1 rounded border border-emerald-700/30 bg-emerald-50 px-2 py-0.5 text-[10px] font-medium text-emerald-900">
+                            <CalendarDays className="h-3 w-3 text-emerald-700" />
+                            Evento no Calendar ({item.calendarMatch.eventCount})
+                          </span>
+                        )}
+                        <span className="inline-flex items-center rounded border border-amber-700/25 bg-amber-50 px-2 py-0.5 text-[10px] font-medium text-amber-900">
+                          Não encontrado na planilha
+                        </span>
+                      </div>
                     </div>
-                    <div className="flex flex-wrap items-center gap-3 shrink-0 tabular-nums">
-                      {signedDateLabel && (
-                        <span className="text-[11px] text-[#313131]/70">
-                          Assinado em {signedDateLabel}
-                        </span>
-                      )}
-                      {item.driveFolder ? (
-                        <a
-                          href={item.driveFolder.urlPasta}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="inline-flex items-center gap-1 rounded border border-[#DCB14A]/60 bg-white px-2 py-0.5 text-[11px] font-medium text-[#313131] hover:border-[#8D6A14]"
+                    <div className="flex flex-wrap items-center gap-2 shrink-0">
+                      {onPrefillZapSignItem && (
+                        <button
+                          type="button"
+                          onClick={() => onPrefillZapSignItem(item)}
+                          className="inline-flex items-center gap-1 rounded-md bg-[#313131] px-2.5 py-1 text-[11px] font-medium text-[#FFD559] hover:bg-[#313131]/90 whitespace-nowrap"
                         >
-                          <FolderOpen className="h-3 w-3 text-[#8D6A14]" />
-                          Pasta no Drive ({item.driveFolder.etapa})
-                          <ExternalLink className="h-2.5 w-2.5 opacity-60" />
-                        </a>
-                      ) : (
-                        <span className="text-[11px] text-[#313131]/55">
-                          Sem pasta no Drive
-                        </span>
+                          <UserPlus className="h-3 w-3" />
+                          Pré-preencher cadastro
+                        </button>
                       )}
                       {item.doc.signedFileUrl && (
                         <a
                           href={item.doc.signedFileUrl}
                           target="_blank"
                           rel="noopener noreferrer"
-                          className="inline-flex items-center gap-1 text-[11px] font-semibold text-[#8D6A14] hover:underline"
+                          className="inline-flex items-center gap-1 rounded-md border border-[#313131]/20 bg-white px-2.5 py-1 text-[11px] font-medium text-[#8D6A14] hover:border-[#DCB14A] whitespace-nowrap"
                         >
                           Ver PDF
                           <ExternalLink className="h-3 w-3" />

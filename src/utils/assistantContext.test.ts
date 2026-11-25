@@ -1,9 +1,15 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  ASSISTANT_FIRM_NAME,
+  ASSISTANT_NAME,
+  ASSISTANT_ROLE_LABEL,
+  MAX_PORTFOLIO_CONTEXT_CHARS,
   buildDocumentAnalysisPrompt,
+  buildDonaSystemPrompt,
   buildPortfolioContextSummary,
   findDocumentReferenceInQuery,
+  sanitizeContextText,
 } from './assistantContext';
 import { ClientCase } from '../types/honorarios';
 
@@ -76,7 +82,32 @@ const sampleClients: ClientCase[] = [
   },
 ];
 
-test('buildPortfolioContextSummary includes KPIs, goals, simulator, ZapSign audit, processNumber, Drive files, and calendar events', () => {
+test('buildDonaSystemPrompt defines Dona exclusively as executive financial and operational assistant for Barreto Advocacia', () => {
+  assert.equal(ASSISTANT_NAME, 'Dona');
+  assert.equal(ASSISTANT_FIRM_NAME, 'Barreto Advocacia');
+  assert.equal(ASSISTANT_ROLE_LABEL, 'Assistente Financeira e Operacional');
+
+  const promptWithContext = buildDonaSystemPrompt(
+    'Total de clientes na carteira: 2'
+  );
+  assert.match(promptWithContext, /Você é Dona/);
+  assert.match(promptWithContext, /assistente financeira e operacional/i);
+  assert.match(promptWithContext, /Barreto Advocacia/);
+  assert.match(promptWithContext, /DIRETO E EXECUTIVO/);
+  assert.match(promptWithContext, /FIDELIDADE ABSOLUTA AOS DADOS/);
+  assert.match(promptWithContext, /MODO SOMENTE LEITURA/);
+  assert.match(promptWithContext, /barretoadvocacia01@gmail\.com/);
+  assert.match(promptWithContext, /Total de clientes na carteira: 2/);
+
+  const promptWithoutContext = buildDonaSystemPrompt('   ');
+  assert.match(promptWithoutContext, /Você é Dona/);
+  assert.match(
+    promptWithoutContext,
+    /Nenhum dado adicional da carteira foi enviado nesta chamada\./
+  );
+});
+
+test('buildPortfolioContextSummary includes Dona identity, session state, KPIs, goals, simulator, ZapSign audit, Drive files, and calendar events', () => {
   const summary = buildPortfolioContextSummary(
     sampleClients,
     [
@@ -89,6 +120,16 @@ test('buildPortfolioContextSummary includes KPIs, goals, simulator, ZapSign audi
     ],
     '2026-11-16',
     {
+      activeTab: 'clientes',
+      selectedMonthKey: '2026-11',
+      sourceMode: 'apps_script',
+      readOnlyMode: true,
+      activeFilters: {
+        search: 'Mariana',
+        stage: '02- Etapa Carlos',
+        modality: 'Parcelado',
+      },
+      focusedClientName: 'Mariana Souza Almeida',
       goalsByMonth: { '2026-11': 30000 },
       defaultGoal: 25000,
       simulatorInputs: {
@@ -127,7 +168,15 @@ test('buildPortfolioContextSummary includes KPIs, goals, simulator, ZapSign audi
     }
   );
 
-  assert.match(summary, /Total de clientes na carteira: 2/);
+  assert.match(
+    summary,
+    /ASSISTENTE: Dona \(Assistente Financeira e Operacional — Barreto Advocacia \/ Barreto Flow\)/
+  );
+  assert.match(summary, /Visão atual no painel: Clientes & Processos/);
+  assert.match(summary, /Origem dos dados: Planilha Real \(Somente Leitura\)/);
+  assert.match(summary, /Filtros ativos na tela: Busca: "Mariana"/);
+  assert.match(summary, /Cliente em foco na tela: Mariana Souza Almeida/);
+  assert.match(summary, /Total de clientes na carteira: 2 \| Parcelas em aberto: 2/);
   assert.match(summary, /Mariana Souza Almeida/);
   assert.match(summary, /1002345-12\.2026\.8\.26\.0100/);
   assert.match(summary, /Contrato de Honorários - Mariana\.pdf/);
@@ -136,6 +185,54 @@ test('buildPortfolioContextSummary includes KPIs, goals, simulator, ZapSign audi
   assert.match(summary, /Investimento Ads/);
   assert.match(summary, /CONTRATOS ASSINADOS NO ZAPSIGN QUE NÃO CONSTAM NA PLANILHA/);
   assert.match(summary, /Patrícia Lima/);
+  assert.doesNotMatch(summary, /\[Token: zs-1\]/);
+});
+
+test('buildPortfolioContextSummary includes focused installment details when a billing item is active', () => {
+  const summary = buildPortfolioContextSummary(sampleClients, [], '2026-11-16', {
+    activeTab: 'calendario',
+    focusedInstallment: {
+      clientName: 'Mariana Souza Almeida',
+      installmentNumber: 1,
+      totalInstallments: 6,
+      amount: 500,
+      dueDate: '2026-11-10',
+      status: 'Atrasada',
+    },
+  });
+
+  assert.match(summary, /Visão atual no painel: Calendário de Cobranças/);
+  assert.match(
+    summary,
+    /Cobrança em foco na tela: Mariana Souza Almeida \| Parcela 1\/6/
+  );
+});
+
+test('sanitizeContextText redacts credential-like tokens and buildPortfolioContextSummary stays within budget', () => {
+  const redacted = sanitizeContextText(
+    'Nota com chave AIzaSyDummyKeyValue123456789012345 e Bearer supersecrettoken123456'
+  );
+  assert.doesNotMatch(redacted, /AIzaSyDummyKeyValue/);
+  assert.doesNotMatch(redacted, /supersecrettoken/);
+  assert.match(redacted, /\[credencial ocultada\]/);
+
+  const hugeClients: ClientCase[] = Array.from({ length: 450 }, (_, idx) => ({
+    id: `bulk-${idx}`,
+    fullName: `Cliente Carteira Extensa ${idx + 1} Sobrenome Completo`,
+    phone: '11999990000',
+    caseType: 'Ação de Divórcio e Partilha de Bens com Alimentos',
+    processNumber: `100000${idx}-12.2026.8.26.0100`,
+    driveStage: 'Protocolados / Processo Ativo',
+    driveFolderUrl: '',
+    modality: 'Parcelado',
+    contractedTotal: 5000,
+    notes: 'Observação operacional detalhada da cliente com histórico completo.',
+    installments: [],
+  }));
+
+  const bounded = buildPortfolioContextSummary(hugeClients, [], '2026-11-16');
+  assert.ok(bounded.length <= MAX_PORTFOLIO_CONTEXT_CHARS);
+  assert.match(bounded, /Resumo condensado/);
 });
 
 test('findDocumentReferenceInQuery matches client and specific document type in natural language', () => {
@@ -162,11 +259,12 @@ test('findDocumentReferenceInQuery matches client and specific document type in 
   assert.equal(noDocMatch, null);
 });
 
-test('buildDocumentAnalysisPrompt asks for process number, object, dates, honorarios, rules, and updates', () => {
+test('buildDocumentAnalysisPrompt addresses Dona and asks for process number, object, dates, honorarios, rules, and updates', () => {
   const prompt = buildDocumentAnalysisPrompt(
     'Mariana Souza Almeida',
     'Contrato.pdf'
   );
+  assert.match(prompt, /^Dona,/);
   assert.match(prompt, /Mariana Souza Almeida/);
   assert.match(prompt, /Contrato\.pdf/);
   assert.match(prompt, /Número do processo/i);

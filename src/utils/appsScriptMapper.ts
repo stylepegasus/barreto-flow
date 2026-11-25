@@ -379,14 +379,17 @@ export function mapAppsScriptPayload(
 
     const rawPhone = String(c.whatsapp ?? c.telefone ?? '').trim();
 
+    const rawCpf = String(c.cpf ?? '').trim();
+
     return {
       id,
       fullName,
+      cpf: rawCpf || undefined,
       phone: rawPhone || '11999999999',
       caseType:
         String(c.acao ?? '').trim() ||
-        (c.cpf && String(c.cpf).trim()
-          ? `Direito de Família · CPF ${String(c.cpf).trim()}`
+        (rawCpf
+          ? `Direito de Família · CPF ${rawCpf}`
           : 'Direito de Família'),
       driveStage,
       rawDriveStage: driveMatch?.rawEtapa,

@@ -1,4 +1,4 @@
-import {
+import type {
   BillingDaySummary,
   ClientCase,
   ClientTotals,
@@ -8,7 +8,7 @@ import {
   InstallmentWithStatus,
   MonthlyChartPoint,
   PaymentModality,
-} from '../types/honorarios';
+} from '../types/honorarios.ts';
 
 const MONTH_ABBR_PT = [
   'Jan',

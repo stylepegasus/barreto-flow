@@ -1,14 +1,16 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
+  AlertCircle,
   Check,
+  ChevronDown,
+  ChevronUp,
   Copy,
   FileText,
   Loader2,
   MessageSquare,
-  Scale,
+  RotateCcw,
   Send,
   Sparkles,
-  Trash2,
   X,
 } from 'lucide-react';
 import {
@@ -20,10 +22,12 @@ import {
 import { fetchDriveFileContent } from '../services/googleWorkspace';
 import { getFirebaseIdToken } from '../services/googleAuth';
 import {
+  ASSISTANT_NAME,
   AssistantContextExtras,
   buildDocumentAnalysisPrompt,
   buildPortfolioContextSummary,
   findDocumentReferenceInQuery,
+  getActiveTabLabel,
 } from '../utils/assistantContext';
 
 export interface PendingDocumentAnalysisRequest {
@@ -48,34 +52,40 @@ interface AssistantChatWidgetProps {
 
 const QUICK_ACTIONS = [
   {
-    id: 'cobrar-hoje',
-    label: 'Quem cobrar hoje?',
+    id: 'resumo-mes',
+    label: 'Resumo do mês',
     prompt:
-      'Quem devemos cobrar hoje? Liste as clientes em atraso e com vencimento na data de hoje, informando parcela, valor e telefone.',
+      'Faça um resumo executivo do mês em análise com base nos dados carregados: previsto, recebido, saldo total a receber, taxa de adimplência e principais pontos de atenção.',
   },
   {
-    id: 'resumo-inadimplentes',
-    label: 'Resumo de inadimplentes',
+    id: 'atrasos-vencimentos',
+    label: 'Atrasos e próximos vencimentos',
     prompt:
-      'Faça um resumo executivo das clientes inadimplentes (em atraso), indicando valores em aberto e prioridades de cobrança.',
+      'Quais parcelas estão em atraso, vencem hoje ou nos próximos 7 dias? Liste cliente, número da parcela, valor, vencimento e ordem de prioridade.',
+  },
+  {
+    id: 'visao-carteira',
+    label: 'Visão geral da carteira',
+    prompt:
+      'Apresente uma visão geral dos clientes e honorários da carteira atual: distribuição por etapa do Drive, maiores saldos em aberto e clientes que merecem acompanhamento.',
   },
   {
     id: 'whatsapp-pix',
-    label: 'Gerar mensagem WhatsApp (PIX)',
+    label: 'Mensagem WhatsApp (PIX)',
     prompt:
-      'Gere mensagens prontas de cobrança para WhatsApp para as clientes em atraso ou com vencimento hoje, incluindo a chave PIX barretoadvocacia01@gmail.com.',
+      'Gere mensagens prontas e cordiais de cobrança para WhatsApp para as clientes em atraso ou com vencimento hoje, incluindo a chave PIX barretoadvocacia01@gmail.com.',
   },
   {
     id: 'simular-meta-roi',
-    label: 'Simular meta e ROI do mês',
+    label: 'Meta e ROI do mês',
     prompt:
-      'Analise a meta do mês atual comparando o Previsto e Recebido na planilha com os parâmetros atuais do Simulador de Tráfego Pago (investimento, CPL, conversão, ticket médio, inadimplência e ROI). Diga se a meta será batida e quantos contratos ainda faltam fechar.',
+      'Compare a meta do mês atual com o Previsto e Recebido na planilha e com os parâmetros do Simulador de Tráfego Pago (investimento, CPL, conversão, ticket médio, inadimplência e ROI). Indique quantos contratos faltam para bater a meta.',
   },
   {
     id: 'auditar-zapsign',
     label: 'Auditar ZapSign × Planilha',
     prompt:
-      'Faça uma auditoria cruzando os contratos assinados no ZapSign com os clientes e parcelas da planilha. Liste quais contratos assinados ainda não foram cadastrados na planilha ou estão sem parcelas confirmadas.',
+      'Faça uma auditoria cruzando os contratos assinados no ZapSign com os clientes e parcelas da planilha. Liste quais contratos assinados ainda não foram cadastrados ou estão sem parcelas confirmadas.',
   },
 ] as const;
 
@@ -91,6 +101,18 @@ function renderInlineBold(text: string): React.ReactNode[] {
     }
     return <React.Fragment key={idx}>{part}</React.Fragment>;
   });
+}
+
+function DonaMonogram({ size = 'md' }: { size?: 'sm' | 'md' }) {
+  const boxClass = size === 'sm' ? 'h-8 w-8 text-sm' : 'h-9 w-9 text-base';
+  return (
+    <span
+      aria-hidden="true"
+      className={`flex ${boxClass} shrink-0 items-center justify-center rounded-lg border border-[#DCB14A]/75 bg-[#DCB14A]/15 font-serif font-bold text-[#FFD559]`}
+    >
+      D
+    </span>
+  );
 }
 
 export const AssistantChatWidget: React.FC<AssistantChatWidgetProps> = ({
@@ -112,6 +134,7 @@ export const AssistantChatWidget: React.FC<AssistantChatWidgetProps> = ({
   >(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [copiedId, setCopiedId] = useState<string | null>(null);
+  const [showQuickActions, setShowQuickActions] = useState(true);
 
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
   const handledRequestIdsRef = useRef<Set<string>>(new Set());
@@ -133,6 +156,11 @@ export const AssistantChatWidget: React.FC<AssistantChatWidgetProps> = ({
     () => clients.reduce((sum, c) => sum + (c.driveFiles?.length ?? 0), 0),
     [clients]
   );
+
+  const activeViewShortLabel = useMemo(() => {
+    const label = getActiveTabLabel(contextExtras?.activeTab);
+    return label.split(' (')[0];
+  }, [contextExtras?.activeTab]);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -232,7 +260,7 @@ export const AssistantChatWidget: React.FC<AssistantChatWidgetProps> = ({
       if (!res.ok || !payload.reply) {
         throw new Error(
           payload.error ||
-            'Não foi possível obter resposta do Assistente Barreto neste momento.'
+            `Não foi possível obter resposta da ${ASSISTANT_NAME} neste momento. Verifique se o serviço de IA está configurado e tente novamente.`
         );
       }
 
@@ -248,7 +276,7 @@ export const AssistantChatWidget: React.FC<AssistantChatWidgetProps> = ({
       const msg =
         err instanceof Error
           ? err.message
-          : 'Erro ao consultar o assistente Mike Ross.';
+          : `Erro ao consultar a ${ASSISTANT_NAME}. Tente novamente em instantes.`;
       setErrorMessage(msg);
     } finally {
       setLoadingStage(null);
@@ -275,6 +303,12 @@ export const AssistantChatWidget: React.FC<AssistantChatWidgetProps> = ({
     void sendMessageToAssistant(text);
   };
 
+  const handleResetConversation = () => {
+    onMessagesChange([]);
+    setErrorMessage(null);
+    setShowQuickActions(true);
+  };
+
   const handleCopyReply = async (msgId: string, text: string) => {
     try {
       await navigator.clipboard.writeText(text);
@@ -295,18 +329,16 @@ export const AssistantChatWidget: React.FC<AssistantChatWidgetProps> = ({
           type="button"
           onClick={() => onOpenChange(true)}
           data-testid="assistant-fab"
-          aria-label="Abrir chat com Mike Ross (Assistente Barreto)"
-          className="fixed bottom-5 right-5 z-40 inline-flex items-center gap-2.5 rounded-xl border border-[#DCB14A]/60 bg-[#313131] px-4 py-3 text-left text-white shadow-lg transition-transform hover:-translate-y-0.5 hover:bg-[#313131]/95 focus:outline-none focus:ring-2 focus:ring-[#DCB14A]"
+          aria-label={`Abrir chat com a ${ASSISTANT_NAME} (Assistente do Barreto Flow)`}
+          className="fixed bottom-5 right-5 z-40 inline-flex items-center gap-2.5 rounded-xl border border-[#DCB14A]/65 bg-[#313131] px-4 py-3 text-left text-white shadow-lg transition-transform hover:-translate-y-0.5 hover:bg-[#313131]/95 focus:outline-none focus:ring-2 focus:ring-[#DCB14A]"
         >
-          <span className="flex h-8 w-8 items-center justify-center rounded-lg border border-[#DCB14A]/70 bg-[#DCB14A]/15 text-[#FFD559] shrink-0">
-            <Scale className="h-4 w-4" />
-          </span>
+          <DonaMonogram size="sm" />
           <span className="leading-tight">
             <span className="block font-serif text-sm font-bold text-white">
-              Mike Ross
+              {ASSISTANT_NAME}
             </span>
             <span className="block text-[10px] font-medium tracking-wide text-[#DCB14A]">
-              Assistente Barreto
+              Assistente Barreto Flow
             </span>
           </span>
         </button>
@@ -320,7 +352,8 @@ export const AssistantChatWidget: React.FC<AssistantChatWidgetProps> = ({
         >
           <aside
             role="dialog"
-            aria-label="Mike Ross — Assistente Barreto"
+            aria-modal="true"
+            aria-label={`${ASSISTANT_NAME} — Assistente Operacional e Financeira`}
             data-testid="assistant-drawer"
             onClick={(e) => e.stopPropagation()}
             className="flex h-full w-full max-w-[440px] flex-col border-l border-[#313131]/15 bg-[#F6F3EC] shadow-2xl"
@@ -328,15 +361,13 @@ export const AssistantChatWidget: React.FC<AssistantChatWidgetProps> = ({
             {/* Header */}
             <div className="flex items-center justify-between gap-3 border-b border-white/10 bg-[#313131] px-5 py-4 text-white">
               <div className="flex items-center gap-3 min-w-0">
-                <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-[#DCB14A]/70 bg-[#DCB14A]/15 text-[#FFD559]">
-                  <Scale className="h-4 w-4" />
-                </div>
+                <DonaMonogram size="md" />
                 <div className="min-w-0">
                   <h2 className="font-serif text-base font-bold text-white truncate">
-                    Mike Ross
+                    {ASSISTANT_NAME}
                   </h2>
                   <p className="text-[11px] font-medium text-[#DCB14A] truncate">
-                    Assistente Barreto · Somente Leitura
+                    Assistente Barreto Flow · Somente Leitura
                   </p>
                 </div>
               </div>
@@ -345,21 +376,20 @@ export const AssistantChatWidget: React.FC<AssistantChatWidgetProps> = ({
                 {messages.length > 0 && (
                   <button
                     type="button"
-                    onClick={() => {
-                      onMessagesChange([]);
-                      setErrorMessage(null);
-                    }}
-                    title="Limpar histórico da conversa"
-                    aria-label="Limpar histórico da conversa"
-                    className="rounded-md p-1.5 text-[#F6F3EC]/70 hover:bg-white/10 hover:text-white"
+                    onClick={handleResetConversation}
+                    disabled={Boolean(loadingStage)}
+                    title="Limpar e reiniciar conversa"
+                    aria-label="Limpar e reiniciar conversa com a Dona"
+                    className="inline-flex items-center gap-1 rounded-md border border-white/15 px-2 py-1 text-[11px] font-medium text-[#F6F3EC]/80 hover:border-[#DCB14A]/50 hover:bg-white/10 hover:text-white disabled:opacity-45"
                   >
-                    <Trash2 className="h-4 w-4" />
+                    <RotateCcw className="h-3.5 w-3.5" />
+                    <span className="hidden sm:inline">Nova conversa</span>
                   </button>
                 )}
                 <button
                   type="button"
                   onClick={() => onOpenChange(false)}
-                  aria-label="Fechar chat"
+                  aria-label="Fechar chat da Dona"
                   className="rounded-md p-1.5 text-[#F6F3EC]/80 hover:bg-white/10 hover:text-white"
                 >
                   <X className="h-4 w-4" />
@@ -368,12 +398,17 @@ export const AssistantChatWidget: React.FC<AssistantChatWidgetProps> = ({
             </div>
 
             {/* Context Summary Strip */}
-            <div className="flex items-center justify-between border-b border-[#313131]/10 bg-white px-5 py-2 text-[11px] text-[#313131]/70 tabular-nums">
-              <span>
-                Carteira conectada: <strong className="text-[#313131]">{clients.length}</strong> cliente(s)
+            <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[#313131]/10 bg-white px-5 py-2 text-[11px] text-[#313131]/70 tabular-nums">
+              <span className="truncate">
+                Sessão:{' '}
+                <strong className="text-[#313131]">{activeViewShortLabel}</strong>
+                {' · '}
+                <strong className="text-[#313131]">{clients.length}</strong>{' '}
+                cliente(s)
               </span>
-              <span>
-                <strong className="text-[#313131]">{totalDriveFiles}</strong> documento(s) no Drive
+              <span className="shrink-0">
+                <strong className="text-[#313131]">{totalDriveFiles}</strong>{' '}
+                doc(s) no Drive
               </span>
             </div>
 
@@ -382,19 +417,24 @@ export const AssistantChatWidget: React.FC<AssistantChatWidgetProps> = ({
               {messages.length === 0 ? (
                 <div className="rounded-xl border border-[#313131]/12 bg-white p-4 space-y-2.5">
                   <div className="flex items-center gap-2 text-xs font-semibold text-[#8D6A14]">
-                    <Sparkles className="h-3.5 w-3.5" />
-                    <span>Olá! Sou Mike Ross, Assistente Barreto.</span>
+                    <Sparkles className="h-3.5 w-3.5 shrink-0" />
+                    <span>
+                      Olá! Sou a {ASSISTANT_NAME}, assistente do Barreto Flow.
+                    </span>
                   </div>
                   <p className="text-xs leading-relaxed text-[#313131]/80">
-                    Já estou conectado aos dados carregados no painel (clientes,
-                    parcelas em aberto, agenda e arquivos listados no Drive).
+                    Acompanho a carteira carregada nesta sessão — honorários,
+                    parcelas em aberto ou atrasadas, vencimentos, metas,
+                    auditoria ZapSign e documentos do Google Drive — sempre em{' '}
+                    <strong className="text-[#313131]">modo somente leitura</strong>{' '}
+                    e sem inventar dados fora do painel.
                   </p>
                   <p className="text-xs leading-relaxed text-[#313131]/75">
-                    Você pode usar os atalhos abaixo, perguntar sobre qualquer
-                    cliente ou clicar em{' '}
-                    <strong className="text-[#313131]">Analisar com IA</strong>{' '}
-                    nos documentos em <em>Clientes &amp; Processos</em> para eu
-                    ler contratos, decisões e protocolos em PDF ou texto.
+                    Escolha uma sugestão rápida abaixo, pergunte sobre qualquer
+                    cliente ou clique em{' '}
+                    <strong className="text-[#313131]">Analisar com a Dona</strong>{' '}
+                    em <em>Clientes &amp; Processos</em> para leitura de contratos
+                    e decisões.
                   </p>
                 </div>
               ) : (
@@ -412,6 +452,12 @@ export const AssistantChatWidget: React.FC<AssistantChatWidgetProps> = ({
                           : 'border border-[#313131]/12 bg-white text-[#313131]'
                       }`}
                     >
+                      {msg.role === 'model' && (
+                        <p className="mb-1.5 text-[10px] font-semibold uppercase tracking-wider text-[#8D6A14]">
+                          {ASSISTANT_NAME}
+                        </p>
+                      )}
+
                       {msg.attachedDocument && (
                         <div className="mb-2 flex items-center gap-1.5 rounded-md border border-[#DCB14A]/45 bg-[#DCB14A]/15 px-2.5 py-1 text-[11px] text-[#FFD559]">
                           <FileText className="h-3.5 w-3.5 shrink-0" />
@@ -454,13 +500,13 @@ export const AssistantChatWidget: React.FC<AssistantChatWidgetProps> = ({
               )}
 
               {loadingStage && (
-                <div className="flex items-start">
+                <div className="flex items-start" role="status" aria-live="polite">
                   <div className="inline-flex items-center gap-2 rounded-xl border border-[#DCB14A]/50 bg-white px-4 py-2.5 text-xs text-[#313131]">
                     <Loader2 className="h-3.5 w-3.5 animate-spin text-[#8D6A14]" />
                     <span>
                       {loadingStage === 'reading_drive'
-                        ? 'Lendo documento no Google Drive...'
-                        : 'Mike Ross está analisando...'}
+                        ? `${ASSISTANT_NAME} está lendo o documento no Google Drive...`
+                        : `${ASSISTANT_NAME} está analisando a carteira...`}
                     </span>
                   </div>
                 </div>
@@ -469,9 +515,20 @@ export const AssistantChatWidget: React.FC<AssistantChatWidgetProps> = ({
               {errorMessage && (
                 <div
                   role="alert"
-                  className="rounded-xl border border-red-700/25 bg-red-50 px-3.5 py-2.5 text-xs text-red-900"
+                  className="flex items-start justify-between gap-2.5 rounded-xl border border-red-700/25 bg-red-50 px-3.5 py-2.5 text-xs text-red-900"
                 >
-                  {errorMessage}
+                  <div className="flex items-start gap-2">
+                    <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-red-700" />
+                    <p className="leading-relaxed">{errorMessage}</p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setErrorMessage(null)}
+                    aria-label="Fechar aviso de erro"
+                    className="rounded p-0.5 text-red-800/70 hover:bg-red-100 hover:text-red-950 shrink-0"
+                  >
+                    <X className="h-3.5 w-3.5" />
+                  </button>
                 </div>
               )}
 
@@ -479,24 +536,44 @@ export const AssistantChatWidget: React.FC<AssistantChatWidgetProps> = ({
             </div>
 
             {/* Quick Action Shortcuts */}
-            <div className="border-t border-[#313131]/10 bg-white/80 px-4 pt-3 pb-2">
-              <p className="mb-2 text-[10px] font-semibold uppercase tracking-wider text-[#313131]/55">
-                Ações rápidas
-              </p>
-              <div className="flex flex-wrap gap-1.5">
-                {QUICK_ACTIONS.map((action) => (
+            <div className="border-t border-[#313131]/10 bg-white/85 px-4 py-2.5">
+              <div className="flex items-center justify-between gap-2">
+                <p className="text-[10px] font-semibold uppercase tracking-wider text-[#313131]/55">
+                  Sugestões rápidas
+                </p>
+                {messages.length > 0 && (
                   <button
-                    key={action.id}
                     type="button"
-                    disabled={Boolean(loadingStage)}
-                    onClick={() => void sendMessageToAssistant(action.prompt)}
-                    className="inline-flex items-center gap-1 rounded-md border border-[#313131]/20 bg-[#F6F3EC] px-2.5 py-1.5 text-[11px] font-medium text-[#313131] hover:border-[#DCB14A] hover:bg-white disabled:opacity-50"
+                    onClick={() => setShowQuickActions((prev) => !prev)}
+                    aria-expanded={showQuickActions}
+                    className="inline-flex items-center gap-1 text-[10px] font-medium text-[#8D6A14] hover:text-[#313131]"
                   >
-                    <MessageSquare className="h-3 w-3 text-[#8D6A14] shrink-0" />
-                    <span>{action.label}</span>
+                    <span>{showQuickActions ? 'Ocultar' : 'Mostrar'}</span>
+                    {showQuickActions ? (
+                      <ChevronDown className="h-3 w-3" />
+                    ) : (
+                      <ChevronUp className="h-3 w-3" />
+                    )}
                   </button>
-                ))}
+                )}
               </div>
+
+              {(messages.length === 0 || showQuickActions) && (
+                <div className="mt-2 flex flex-wrap gap-1.5">
+                  {QUICK_ACTIONS.map((action) => (
+                    <button
+                      key={action.id}
+                      type="button"
+                      disabled={Boolean(loadingStage)}
+                      onClick={() => void sendMessageToAssistant(action.prompt)}
+                      className="inline-flex items-center gap-1 rounded-md border border-[#313131]/20 bg-[#F6F3EC] px-2.5 py-1.5 text-[11px] font-medium text-[#313131] hover:border-[#DCB14A] hover:bg-white disabled:opacity-50"
+                    >
+                      <MessageSquare className="h-3 w-3 text-[#8D6A14] shrink-0" />
+                      <span>{action.label}</span>
+                    </button>
+                  ))}
+                </div>
+              )}
             </div>
 
             {/* Composer */}
@@ -519,14 +596,14 @@ export const AssistantChatWidget: React.FC<AssistantChatWidgetProps> = ({
                       }
                     }
                   }}
-                  placeholder="Pergunte sobre cobranças, parcelas ou peça para analisar um documento..."
-                  aria-label="Mensagem para Mike Ross"
+                  placeholder={`Pergunte à ${ASSISTANT_NAME} sobre honorários, parcelas, vencimentos ou documentos...`}
+                  aria-label={`Mensagem para a ${ASSISTANT_NAME}`}
                   className="flex-1 resize-none rounded-lg border border-[#313131]/20 bg-[#F6F3EC] px-3 py-2 text-xs text-[#313131] placeholder:text-[#313131]/45 focus:border-[#DCB14A] focus:bg-white focus:outline-none"
                 />
                 <button
                   type="submit"
                   disabled={!inputValue.trim() || Boolean(loadingStage)}
-                  aria-label="Enviar mensagem"
+                  aria-label={`Enviar mensagem para a ${ASSISTANT_NAME}`}
                   className="inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-[#313131] text-[#FFD559] hover:bg-[#313131]/90 disabled:opacity-45"
                 >
                   <Send className="h-4 w-4" />

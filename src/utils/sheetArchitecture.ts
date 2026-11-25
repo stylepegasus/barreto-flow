@@ -1,14 +1,14 @@
 import {
-  ClientCase,
   DRIVE_STAGES,
-  DriveArchitectureSummary,
-  DriveFolderNode,
-  DriveStage,
-  Installment,
-  PaymentModality,
-  SheetTabArchitecture,
-  WorkspaceArchitectureSnapshot,
-} from '../types/honorarios';
+  type ClientCase,
+  type DriveArchitectureSummary,
+  type DriveFolderNode,
+  type DriveStage,
+  type Installment,
+  type PaymentModality,
+  type SheetTabArchitecture,
+  type WorkspaceArchitectureSnapshot,
+} from '../types/honorarios.ts';
 
 export function normalizeText(value: string): string {
   return value

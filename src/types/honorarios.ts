@@ -47,6 +47,7 @@ export interface DriveFileItem {
 export interface ClientCase {
   id: string;
   fullName: string;
+  cpf?: string;
   phone: string;
   caseType: string;
   processNumber?: string;
@@ -320,6 +321,7 @@ export interface ZapSignSigner {
   name: string;
   email?: string;
   phone?: string;
+  cpf?: string;
   signedAt?: string;
 }
 
@@ -330,6 +332,8 @@ export interface ZapSignSignedDoc {
   createdAt: string;
   signedAt: string;
   signedFileUrl?: string;
+  folderPath?: string;
+  folderName?: string;
   signers: ZapSignSigner[];
 }
 
@@ -346,20 +350,123 @@ export interface ZapSignDriveFolderInfo {
   nomePasta: string;
   urlPasta: string;
   isClosed: boolean;
+  isExcludedFolder?: boolean;
 }
+
+export interface ZapSignCalendarMatchInfo {
+  eventCount: number;
+  latestEventTitle: string;
+  latestEventDate?: string;
+  eventIds: string[];
+}
+
+export type ZapSignSourceName = 'Sheets' | 'Drive' | 'Calendar';
+
+export type ZapSignLinkageStatus =
+  | 'vinculado_planilha'
+  | 'vinculado_drive_ou_agenda_sem_planilha'
+  | 'pendente_cadastro';
 
 export type ZapSignAuditStatus =
   | 'matched_spreadsheet'
   | 'closed_archive'
+  | 'excluded_folder'
+  | 'procedural_non_contract'
   | 'missing_in_spreadsheet';
+
+export interface ZapSignExtractedProfile {
+  cleanName: string;
+  candidateNames: string[];
+  cpf?: string;
+  phone?: string;
+  email?: string;
+  signedAt: string;
+}
+
+export interface ZapSignNormalizedTitle {
+  rawTitle: string;
+  normalizedTitle: string;
+  extractedNames: string[];
+  isProcedural: boolean;
+}
+
+export interface ZapSignFolderExclusionDiagnostic {
+  excluded: boolean;
+  source: 'zapsign' | 'drive' | 'client' | null;
+  matchedRule?: string;
+  folderLabel?: string;
+  isClosedArchive: boolean;
+}
+
+export interface ZapSignDocumentDiagnostic {
+  token: string;
+  rawTitle: string;
+  normalizedTitle: string;
+  extractedNames: string[];
+  primarySignerName: string;
+  isProceduralTitle: boolean;
+  folderExclusion: ZapSignFolderExclusionDiagnostic;
+  sources: {
+    zapsign: {
+      signedAt: string;
+      folderPath?: string;
+      folderName?: string;
+      clientSignersCount: number;
+      ignoredFirmSignersCount: number;
+      cpf?: string;
+      phone?: string;
+      email?: string;
+    };
+    sheets: {
+      matched: boolean;
+      clientId?: string;
+      clientName?: string;
+      score: number;
+      matchCriteria?: 'cpf' | 'phone' | 'name' | 'co_holder' | null;
+      reason?: string;
+    };
+    drive: {
+      matched: boolean;
+      etapa?: string;
+      folderName?: string;
+      folderUrl?: string;
+      score: number;
+      isExcludedFolder: boolean;
+      reason?: string;
+    };
+    calendar: {
+      matched: boolean;
+      eventCount: number;
+      latestEventTitle?: string;
+      latestEventDate?: string;
+      eventIds: string[];
+      reason?: string;
+    };
+  };
+  matchedSources: ZapSignSourceName[];
+  auditStatus: ZapSignAuditStatus;
+  linkageStatus: ZapSignLinkageStatus;
+  matchScore: number;
+  matchReason: string;
+}
 
 export interface ZapSignCrossReferenceItem {
   doc: ZapSignSignedDoc;
   primarySignerName: string;
   auditStatus: ZapSignAuditStatus;
+  linkageStatus?: ZapSignLinkageStatus;
+  matchedSources?: ZapSignSourceName[];
+  matchedClientId?: string;
+  matchedClientName?: string;
+  matchScore?: number;
+  matchReason?: string;
   inSpreadsheet: boolean;
   matchedClient?: ClientCase;
   driveFolder?: ZapSignDriveFolderInfo;
+  calendarMatch?: ZapSignCalendarMatchInfo;
+  extractedProfile?: ZapSignExtractedProfile;
+  diagnostic?: ZapSignDocumentDiagnostic;
 }
+
 
 
