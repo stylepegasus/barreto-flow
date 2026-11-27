@@ -19,7 +19,7 @@ import {
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-const PORT = Number(process.env.PORT) || 3000;
+const PORT = Number(process.env.PORT) || 8080;
 const PRIMARY_MODEL = 'gemini-4-hydrogen';
 const FALLBACK_MODEL = 'gemini-3.1-flash-lite';
 const DEFAULT_WORKSPACE_APPS_SCRIPT_URL =
@@ -32,6 +32,8 @@ const WORKSPACE_CACHE_FRESH_TTL_MS = 15_000;
 const WORKSPACE_CACHE_STALE_TTL_MS = 30 * 60_000;
 const WORKSPACE_CACHE_MAX_ENTRIES = 10;
 const WORKSPACE_FETCH_TIMEOUT_MS = 65_000;
+const ZAPSIGN_FETCH_TIMEOUT_MS = 20_000;
+const SHUTDOWN_TIMEOUT_MS = 8_000;
 
 interface ServerWorkspaceCacheEntry {
   data: EnrichedAppsScriptSyncResult;
@@ -181,6 +183,8 @@ function paginateWorkspaceResult(
 }
 
 function loadFirebaseProjectId(): string {
+  const envProjectId = process.env.FIREBASE_PROJECT_ID?.trim();
+  if (envProjectId) return envProjectId;
   try {
     const raw = fs.readFileSync(
       path.resolve(__dirname, 'firebase-applet-config.json'),
@@ -191,7 +195,7 @@ function loadFirebaseProjectId(): string {
   } catch {
     // fallback below
   }
-  return process.env.FIREBASE_PROJECT_ID || 'gen-lang-client-0925403191';
+  return 'gen-lang-client-0925403191';
 }
 
 const FIREBASE_PROJECT_ID = loadFirebaseProjectId();
@@ -353,12 +357,25 @@ async function generateWithFallback(
   }
 }
 
+let isShuttingDown = false;
+
 async function startServer() {
   const app = express();
+  app.set('trust proxy', true);
+  app.disable('x-powered-by');
   app.use(express.json({ limit: '30mb' }));
 
   app.get('/api/health', (_req, res) => {
-    res.status(200).json({ ok: true });
+    res.setHeader('Cache-Control', 'no-store');
+    if (isShuttingDown) {
+      res.status(503).json({ ok: false, status: 'shutting_down' });
+      return;
+    }
+    res.status(200).json({
+      ok: true,
+      status: 'healthy',
+      uptimeSeconds: Math.floor(process.uptime()),
+    });
   });
 
   app.post('/api/assistant/chat', requireAuthorizedUser, async (req, res) => {
@@ -438,13 +455,24 @@ async function startServer() {
 
       while (nextUrl && pageCount < 10) {
         pageCount += 1;
-        const zapRes = await fetch(nextUrl, {
-          method: 'GET',
-          headers: {
-            Authorization: `Bearer ${token}`,
-            Accept: 'application/json',
-          },
-        });
+        const controller = new AbortController();
+        const timer = setTimeout(
+          () => controller.abort(),
+          ZAPSIGN_FETCH_TIMEOUT_MS
+        );
+        let zapRes: Response;
+        try {
+          zapRes = await fetch(nextUrl, {
+            method: 'GET',
+            headers: {
+              Authorization: `Bearer ${token}`,
+              Accept: 'application/json',
+            },
+            signal: controller.signal,
+          });
+        } finally {
+          clearTimeout(timer);
+        }
 
         if (!zapRes.ok) {
           const status = zapRes.status;
@@ -592,6 +620,10 @@ async function startServer() {
     }
   );
 
+  app.use('/api', (_req, res) => {
+    res.status(404).json({ error: 'Rota de API não encontrada.' });
+  });
+
   const distDir = path.resolve(__dirname, 'dist');
   const distIndexPath = path.join(distDir, 'index.html');
   const isProduction =
@@ -606,18 +638,117 @@ async function startServer() {
     });
     app.use(vite.middlewares);
   } else {
-    app.use(express.static(distDir));
+    app.use(
+      express.static(distDir, {
+        index: false,
+        setHeaders: (res, filePath) => {
+          if (filePath.endsWith('.html')) {
+            res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+          } else if (
+            filePath.includes(`${path.sep}assets${path.sep}`) ||
+            filePath.includes('/assets/')
+          ) {
+            res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+          }
+        },
+      })
+    );
     app.get('*', (_req, res) => {
+      if (!fs.existsSync(distIndexPath)) {
+        res
+          .status(503)
+          .type('text/plain; charset=utf-8')
+          .send('Interface de produção indisponível no momento.');
+        return;
+      }
+      res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
       res.sendFile(distIndexPath);
     });
   }
 
-  app.listen(PORT, '0.0.0.0', () => {
-    console.log(`Barreto Advocacia server running on http://0.0.0.0:${PORT}`);
+  app.use(
+    (
+      err: unknown,
+      _req: express.Request,
+      res: express.Response,
+      _next: express.NextFunction
+    ) => {
+      const status =
+        typeof err === 'object' &&
+        err !== null &&
+        'status' in err &&
+        typeof (err as { status?: unknown }).status === 'number'
+          ? (err as { status: number }).status
+          : 500;
+      const msg = err instanceof Error ? err.message : String(err ?? 'Unknown error');
+      console.error(`[Barreto Flow] Erro HTTP ${status}:`, msg);
+      if (res.headersSent) return;
+      res.status(status >= 400 && status < 600 ? status : 500).json({
+        error:
+          status === 400 || status === 413
+            ? 'Requisição inválida ou payload excede o limite suportado.'
+            : 'Erro interno temporário no servidor. Tente novamente em instantes.',
+      });
+    }
+  );
+
+  const server = app.listen(PORT, '0.0.0.0', () => {
+    console.log(
+      `Barreto Flow server running on http://0.0.0.0:${PORT} (mode=${isProduction ? 'production' : 'development'})`
+    );
+  });
+
+  server.keepAliveTimeout = 65_000;
+  server.headersTimeout = 66_000;
+
+  server.on('error', (err: NodeJS.ErrnoException) => {
+    console.error('[Barreto Flow] Falha fatal ao escutar porta:', err.message);
+    process.exit(1);
+  });
+
+  const gracefulShutdown = (signal: string, exitCode = 0) => {
+    if (isShuttingDown) return;
+    isShuttingDown = true;
+    console.log(
+      `[Barreto Flow] Recebido ${signal}. Encerrando servidor com segurança...`
+    );
+    const forceTimer = setTimeout(() => {
+      console.error(
+        '[Barreto Flow] Tempo limite de encerramento gracioso atingido. Finalizando processo.'
+      );
+      process.exit(exitCode || 1);
+    }, SHUTDOWN_TIMEOUT_MS);
+    forceTimer.unref();
+
+    server.close((closeErr) => {
+      clearTimeout(forceTimer);
+      if (closeErr) {
+        console.error('[Barreto Flow] Erro ao fechar conexões HTTP:', closeErr.message);
+        process.exit(1);
+      }
+      console.log('[Barreto Flow] Servidor encerrado com sucesso.');
+      process.exit(exitCode);
+    });
+  };
+
+  process.on('SIGTERM', () => gracefulShutdown('SIGTERM', 0));
+  process.on('SIGINT', () => gracefulShutdown('SIGINT', 0));
+  process.on('unhandledRejection', (reason) => {
+    console.error(
+      '[Barreto Flow] Unhandled Promise Rejection capturada:',
+      reason instanceof Error ? reason.stack || reason.message : reason
+    );
+  });
+  process.on('uncaughtException', (err) => {
+    console.error(
+      '[Barreto Flow] Uncaught Exception capturada:',
+      err.stack || err.message
+    );
+    gracefulShutdown('uncaughtException', 1);
   });
 }
 
 startServer().catch((err) => {
-  console.error('Failed to start server:', err);
+  console.error('[Barreto Flow] Falha ao iniciar servidor:', err);
   process.exit(1);
 });

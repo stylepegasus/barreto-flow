@@ -6,7 +6,9 @@
 .idea
 
 # AI Studio & automated browser artifacts
+.agents
 .aistudio
+.antigravity
 .playwright-cli
 
 # Dependencies & build outputs (generated cleanly inside Docker)
