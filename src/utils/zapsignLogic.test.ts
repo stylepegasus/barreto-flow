@@ -374,8 +374,8 @@ test('matchZapSignToClients reconciles multi-source across Sheets (CPF/phone/co-
   assert.equal(rainaraAudit?.matchedClientName, 'Rainara Oliveira Mendes');
   assert.ok(rainaraAudit?.matchedSources?.includes('Drive'));
 
-  // 4. Only 2 unmatched items remain (Fernanda & Beatriz)
-  assert.equal(result.unmatchedAuditItems.length, 2);
+  // 4. Only 1 truly pending unmatched item remains (Fernanda); Beatriz is validated in Google ecosystem via active Drive folder
+  assert.equal(result.unmatchedAuditItems.length, 1);
 
   // Fernanda (newest): pendente_cadastro, no sources
   const fernandaItem = result.unmatchedAuditItems[0];
@@ -383,9 +383,11 @@ test('matchZapSignToClients reconciles multi-source across Sheets (CPF/phone/co-
   assert.equal(fernandaItem.linkageStatus, 'pendente_cadastro');
   assert.deepEqual(fernandaItem.matchedSources, []);
 
-  // Beatriz: vinculado_drive_ou_agenda_sem_planilha, Drive (BA-048 stripped!) + Calendar found + extracted CPF/phone
-  const beatrizItem = result.unmatchedAuditItems[1];
+  // Beatriz: validated in Google ecosystem via Drive (BA-048 stripped!) + Calendar -> removed from ZapSign pending queue
+  assert.equal(result.googleValidatedAuditItems.length, 1);
+  const beatrizItem = result.googleValidatedAuditItems[0];
   assert.equal(beatrizItem.primarySignerName, 'Beatriz Nogueira');
+  assert.equal(beatrizItem.auditStatus, 'matched_google_ecosystem');
   assert.equal(
     beatrizItem.linkageStatus,
     'vinculado_drive_ou_agenda_sem_planilha'
@@ -812,4 +814,158 @@ test('formatZapSignDateBR converts ISO timestamps into dd/mm/yyyy', () => {
   assert.equal(formatZapSignDateBR('2026-11-14T18:20:00Z'), '14/11/2026');
   assert.equal(formatZapSignDateBR('2026-11-05'), '05/11/2026');
   assert.equal(formatZapSignDateBR(''), '');
+});
+
+test('ZapSign cleans underscore-delimited and Hipossuficiência typo titles, deduplicates per client, prevents Maria/Marcia collision, and respects Google ecosystem sovereignty', () => {
+  // 1. Underscore filenames & Hipossuficiência typo cleaning
+  assert.equal(
+    cleanZapSignDocumentTitle(
+      'Contrato_Procuracao_Declaracoes_Gilmara_Caio_Matheus.docx'
+    ),
+    'Gilmara Caio Matheus'
+  );
+  assert.equal(
+    cleanZapSignDocumentTitle(
+      'Contrato, Procuração e Declaração de Hipossuficioência - Laís.docx'
+    ),
+    'Laís'
+  );
+  assert.equal(
+    cleanZapSignDocumentTitle(
+      'Contrato, Procuração, Hipossuficiência & Declaração - Nayara.docx'
+    ),
+    'Nayara'
+  );
+
+  // 2. Prevent 5-letter false collision "Maria" <-> "Márcia"
+  assert.equal(isNameMatch('Maria Eduarda Soares', 'Márcia Eduarda'), false);
+
+  // 3. Drive decorator cleaning strips operational suffixes like "- corrigida" / "- Carlos"
+  assert.equal(
+    stripDriveFolderDecorators('BA-055 - Gilmara Oliveira - corrigida'),
+    'Gilmara Oliveira'
+  );
+  assert.equal(
+    stripDriveFolderDecorators('Nayara Costa - Execução e Prisão'),
+    'Nayara Costa'
+  );
+
+  // 4. Google ecosystem sovereignty (Sheets + Contratos + ZapSign tab + Drive "Clientes Tráfego Pago") & deduplication
+  const localClients: ClientCase[] = [
+    {
+      id: 'BA-063',
+      fullName: 'Gilmara Oliveira dos Santos',
+      phone: '61999991111',
+      caseType: 'Alimentos',
+      driveStage: 'Protocolados / Processo Ativo',
+      driveFolderUrl: 'https://drive.google.com/drive/folders/gilmara-1',
+      modality: 'Parcelado',
+      contractedTotal: 2500,
+      installments: [],
+    },
+    {
+      id: 'BA-091',
+      fullName: 'Larissa Ribeiro Gomes',
+      phone: '61999992222',
+      caseType: 'Guarda',
+      driveStage: '01- Etapa Luis',
+      driveFolderUrl: 'https://drive.google.com/drive/folders/larissa-1',
+      modality: 'Parcelado',
+      contractedTotal: 2000,
+      installments: [],
+    },
+    {
+      id: 'BA-092',
+      fullName: 'Laryssa Alves Pereira',
+      phone: '61999993333',
+      caseType: 'Guarda',
+      driveStage: '01- Etapa Luis',
+      driveFolderUrl: 'https://drive.google.com/drive/folders/laryssa-1',
+      modality: 'Parcelado',
+      contractedTotal: 2000,
+      installments: [],
+    },
+  ];
+
+  const driveEtapas: AppsScriptDriveEtapaRow[] = [
+    {
+      etapa: '03- Etapa Gilmar/Paulo Henrique Filho',
+      nomePasta: 'BA-099 - Camila Rocha Lima',
+      urlPasta: 'https://drive.google.com/drive/folders/camila-drive-ok',
+    },
+  ];
+
+  const docs = normalizeZapSignDocsPayload([
+    {
+      // Underscore title without signers -> resolves to Gilmara via first-token +/or ZapSign tab
+      token: 'zs-gilmara',
+      name: 'Contrato_Procuracao_Declaracoes_Gilmara_Caio_Matheus.docx',
+      status: 'signed',
+      created_at: '2026-11-10T10:00:00Z',
+      signers: [],
+    },
+    {
+      // Exact "Larissa" wins over phonetic "Laryssa" (no false ambiguity)
+      token: 'zs-larissa',
+      name: 'Contrato & Procuração - Larissa.pdf',
+      status: 'signed',
+      created_at: '2026-11-12T10:00:00Z',
+      signers: [],
+    },
+    {
+      // Not in Sheets, BUT has active folder in Drive "Clientes Tráfego Pago" -> validated in Google ecosystem!
+      token: 'zs-camila-drive',
+      name: 'Contrato de Honorários - Camila Rocha Lima.pdf',
+      status: 'signed',
+      created_at: '2026-11-13T10:00:00Z',
+      signers: [{ name: 'Camila Rocha Lima' }],
+    },
+    {
+      // Canceled contract in Contratos tab -> excluded as closed_archive
+      token: 'zs-canceled-ref',
+      name: 'Contrato de Honorários - Roberto Desistente.pdf',
+      status: 'signed',
+      created_at: '2026-11-11T10:00:00Z',
+      signers: [{ name: 'Roberto Desistente' }],
+    },
+    {
+      // Duplicate ZapSign docs for the SAME truly pending client -> must deduplicate into 1 pending item!
+      token: 'zs-dup-1',
+      name: 'Contrato de Honorários - Tatiana Nova Cliente.pdf',
+      status: 'signed',
+      created_at: '2026-11-15T10:00:00Z',
+      signers: [{ name: 'Tatiana Nova Cliente', cpf: '111.222.333-44' }],
+    },
+    {
+      token: 'zs-dup-2',
+      name: 'Procuração Ad Judicia - Tatiana Nova Cliente (1).pdf',
+      status: 'signed',
+      created_at: '2026-11-16T10:00:00Z',
+      signers: [{ name: 'Tatiana Nova Cliente', cpf: '111.222.333-44' }],
+    },
+  ]);
+
+  const res = matchZapSignToClients(localClients, docs, driveEtapas, [], {
+    contracts: [
+      {
+        idCliente: 'BA-CANC-1',
+        cliente: 'Roberto Desistente',
+        status: 'CANCELADO POR DESISTÊNCIA',
+      },
+    ],
+  });
+
+  // Gilmara & Larissa matched directly to Sheets
+  assert.equal(res.matchedByClientId['BA-063']?.length, 1);
+  assert.equal(res.matchedByClientId['BA-091']?.length, 1);
+  // Camila validated via active Drive folder (Google ecosystem sovereignty)
+  assert.equal(res.googleValidatedAuditItems.length, 1);
+  assert.equal(res.googleValidatedAuditItems[0].doc.token, 'zs-camila-drive');
+  // Roberto excluded via Contratos tab canceled status
+  assert.equal(res.closedAuditItems.length, 1);
+  assert.equal(res.closedAuditItems[0].doc.token, 'zs-canceled-ref');
+  // Tatiana's 2 duplicate ZapSign docs deduplicated into exactly 1 pending item!
+  assert.equal(res.unmatchedAuditItems.length, 1);
+  assert.equal(res.unmatchedAuditItems[0].groupedDocsCount, 2);
+  assert.equal(res.unmatchedAuditItems[0].groupedDocTokens?.length, 2);
 });

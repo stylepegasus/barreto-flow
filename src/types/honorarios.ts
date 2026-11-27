@@ -30,8 +30,13 @@ export interface Installment {
   installmentNumber: number;
   totalInstallments: number;
   amount: number;
+  receivedAmount?: number;
+  remainingAmount?: number;
   dueDate: string; // YYYY-MM-DD
   paidDate?: string; // YYYY-MM-DD
+  lastPaymentDate?: string; // YYYY-MM-DD (also tracks partial payments)
+  isDateConfirmed?: boolean;
+  rawStatus?: string;
   calendarEventId?: string;
   sheetRowNumber?: number;
 }
@@ -57,6 +62,12 @@ export interface ClientCase {
   driveFiles?: DriveFileItem[];
   modality: PaymentModality;
   contractedTotal: number;
+  sheetTotalPaid?: number;
+  sheetRemainingBalance?: number;
+  undatedBalance?: number;
+  unlinkedCredit?: number;
+  sheetStatus?: string;
+  isCanceled?: boolean;
   notes?: string;
   installments: Installment[];
 }
@@ -71,6 +82,12 @@ export interface InstallmentWithStatus extends Installment {
 
 export interface DashboardKPIs {
   totalAReceber: number;
+  saldoParcelasDatadas?: number;
+  saldoSemData?: number;
+  creditoAVincular?: number;
+  totalJaRecebido?: number;
+  faltaNoMes?: number;
+  isOfficialDashboardSource?: boolean;
   recebidoNoMes: number;
   previstoNoMes: number;
   parcelasEmAtrasoCount: number;
@@ -214,7 +231,58 @@ export interface AppsScriptInstallmentRow {
   situacao?: string;
   ultimoPagamento?: string;
   alerta?: string;
-  dataConfirmada?: string;
+  dataConfirmada?: boolean | string;
+  mesVencimento?: string;
+  diaVencimento?: number | string;
+}
+
+export interface AppsScriptPaymentRow {
+  idPagamento?: string;
+  dataPagamento?: string;
+  idCliente?: string;
+  cliente?: string;
+  valor?: number | string;
+  meio?: string;
+  tipo?: string;
+  idParcela?: string;
+  observacao?: string;
+  mesRecebido?: string;
+  valorAtivo?: number | string;
+  statusRegistro?: string;
+}
+
+export interface AppsScriptContractRow {
+  idCliente?: string;
+  cliente?: string;
+  cpf?: string;
+  status?: string;
+  acao?: string;
+  modalidade?: string;
+  valorTotal?: number | string;
+}
+
+export interface AppsScriptZapSignRefRow {
+  documento?: string;
+  cliente?: string;
+  cpf?: string;
+  status?: string;
+  idCliente?: string;
+  dataAssinatura?: string;
+}
+
+export interface AppsScriptDashboardSnapshot {
+  mesReferencia?: string; // YYYY-MM
+  saldoTotalAReceber: number;
+  saldoParcelasDatadas: number;
+  saldoSemData: number;
+  creditoAVincular: number;
+  totalJaRecebido: number;
+  recebidoNoMes: number;
+  previstoNoMes: number;
+  parcelasAtrasadasValor: number;
+  parcelasAtrasadasCount?: number;
+  faltaParcelasMes: number;
+  fromOfficialSheetTab?: boolean;
 }
 
 export interface AppsScriptDriveEtapaRow {
@@ -239,8 +307,12 @@ export interface AppsScriptCalendarEventRow {
 }
 
 export interface AppsScriptPayload {
+  dashboard?: Partial<AppsScriptDashboardSnapshot> & Record<string, unknown>;
   clientes?: AppsScriptClientRow[];
   parcelas?: AppsScriptInstallmentRow[];
+  pagamentos?: AppsScriptPaymentRow[];
+  contratos?: AppsScriptContractRow[];
+  zapsignConferencia?: AppsScriptZapSignRefRow[];
   driveEtapas?: AppsScriptDriveEtapaRow[];
   eventosAgenda?: AppsScriptCalendarEventRow[];
 }
@@ -249,10 +321,15 @@ export interface AppsScriptSyncResult {
   clients: ClientCase[];
   calendarEvents: AppsScriptCalendarEventRow[];
   driveEtapas: AppsScriptDriveEtapaRow[];
+  officialDashboard?: AppsScriptDashboardSnapshot;
+  payments?: AppsScriptPaymentRow[];
+  contracts?: AppsScriptContractRow[];
+  zapSignRefs?: AppsScriptZapSignRefRow[];
   summary: {
     syncedAt: string;
     clientesCount: number;
     parcelasCount: number;
+    pagamentosCount?: number;
     driveEtapasCount: number;
     matchedDriveCount: number;
     driveFilesCount: number;
@@ -369,6 +446,7 @@ export type ZapSignLinkageStatus =
 
 export type ZapSignAuditStatus =
   | 'matched_spreadsheet'
+  | 'matched_google_ecosystem'
   | 'closed_archive'
   | 'excluded_folder'
   | 'procedural_non_contract'
@@ -466,6 +544,8 @@ export interface ZapSignCrossReferenceItem {
   calendarMatch?: ZapSignCalendarMatchInfo;
   extractedProfile?: ZapSignExtractedProfile;
   diagnostic?: ZapSignDocumentDiagnostic;
+  groupedDocsCount?: number;
+  groupedDocTokens?: string[];
 }
 
 

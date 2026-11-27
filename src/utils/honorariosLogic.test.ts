@@ -173,3 +173,109 @@ test('validateAppsScriptUrl enforces valid HTTPS Apps Script URLs', () => {
     true
   );
 });
+
+test('calculateDashboardKPIs uses exact cent arithmetic with undated balances, partial installments, and Pagamentos ledger', () => {
+  const clients = [
+    {
+      id: 'BA-028',
+      fullName: 'Ana Paula Campos Gurgel',
+      phone: '61999990001',
+      caseType: 'Alimentos',
+      driveStage: 'Protocolados / Processo Ativo' as const,
+      driveFolderUrl: 'https://drive.google.com/drive/folders/ana',
+      modality: 'Parcelado' as const,
+      contractedTotal: 2000,
+      undatedBalance: 0,
+      unlinkedCredit: 0,
+      installments: [
+        {
+          id: 'BA-028-03',
+          clientId: 'BA-028',
+          clientName: 'Ana Paula Campos Gurgel',
+          installmentNumber: 3,
+          totalInstallments: 3,
+          amount: 666.68,
+          receivedAmount: 666.67,
+          remainingAmount: 0.01,
+          dueDate: '2026-11-10',
+          lastPaymentDate: '2026-11-18',
+        },
+      ],
+    },
+    {
+      id: 'BA-079',
+      fullName: 'Francisco Vagner',
+      phone: '61999990002',
+      caseType: 'Divórcio',
+      driveStage: '01- Etapa Luis' as const,
+      driveFolderUrl: 'https://drive.google.com/drive/folders/vagner',
+      modality: 'Parcelado' as const,
+      contractedTotal: 3000,
+      undatedBalance: 47750,
+      unlinkedCredit: 500,
+      installments: [
+        {
+          id: 'BA-079-DATED',
+          clientId: 'BA-079',
+          clientName: 'Francisco Vagner',
+          installmentNumber: 1,
+          totalInstallments: 1,
+          amount: 130490.6,
+          receivedAmount: 0,
+          remainingAmount: 130490.6,
+          dueDate: '2026-12-10',
+        },
+      ],
+    },
+  ];
+
+  const payments = [
+    {
+      idPagamento: 'P1',
+      valor: 6886.67,
+      valorAtivo: 6886.67,
+      dataPagamento: '2026-11-18',
+      mesRecebido: '2026-11',
+      statusRegistro: 'PAGO',
+    },
+    {
+      idPagamento: 'P-JUROS',
+      idCliente: 'JUROS',
+      idParcela: 'BA-044-JUROS',
+      valor: 20,
+      valorAtivo: 20,
+      dataPagamento: '2026-11-18',
+      mesRecebido: '2026-11',
+      statusRegistro: 'PAGO',
+    },
+    {
+      idPagamento: 'P-OLD',
+      valor: 13473.32,
+      valorAtivo: 13473.32,
+      dataPagamento: '',
+      mesRecebido: '2026-10',
+      statusRegistro: 'PAGO',
+    },
+  ];
+
+  const kpis = calculateDashboardKPIs(clients, '2026-11-27', '2026-11', {
+    payments,
+  });
+
+  // Exact cent parity with official Barreto spreadsheet Dashboard!
+  assert.equal(kpis.saldoParcelasDatadas, 130490.61);
+  assert.equal(kpis.saldoSemData, 47750);
+  assert.equal(kpis.totalAReceber, 178240.61);
+  assert.equal(kpis.creditoAVincular, 500);
+  assert.equal(kpis.recebidoNoMes, 6906.67);
+  assert.equal(kpis.totalJaRecebido, 20379.99);
+  assert.equal(kpis.parcelasEmAtrasoValor, 0.01);
+  assert.equal(kpis.parcelasEmAtrasoCount, 1);
+  assert.equal(kpis.faltaNoMes, 0.01);
+
+  const chart = calculateMonthlyChartData(clients, 2026, 11, payments);
+  const novBar = chart.find((p) => p.monthKey === '2026-11');
+  assert.equal(novBar?.recebido, 6906.67);
+  const octBar = chart.find((p) => p.monthKey === '2026-10');
+  assert.equal(octBar?.recebido, 13473.32);
+});

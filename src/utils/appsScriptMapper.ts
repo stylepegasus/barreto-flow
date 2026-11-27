@@ -2,22 +2,29 @@ import {
   DRIVE_STAGES,
   type AppsScriptCalendarEventRow,
   type AppsScriptClientRow,
+  type AppsScriptContractRow,
+  type AppsScriptDashboardSnapshot,
   type AppsScriptDriveEtapaRow,
   type AppsScriptInstallmentRow,
   type AppsScriptPayload,
+  type AppsScriptPaymentRow,
   type AppsScriptSyncResult,
+  type AppsScriptZapSignRefRow,
   type ClientCase,
   type DriveFileItem,
   type DriveStage,
   type Installment,
 } from '../types/honorarios.ts';
 import {
+  fromCents,
   isValidDriveFolderUrl,
   normalizeText,
   parseBRLAmountStrict,
   parseFlexibleDateStrict,
   resolveModality,
   resolveStage,
+  toCents,
+  type StrictDateParseResult,
 } from './sheetArchitecture.ts';
 
 export type SyncWarningCode =
@@ -176,6 +183,104 @@ function parseParcelNumberPair(
   return { number: fallbackIndex, total: fallbackTotal };
 }
 
+const SUMMARY_ROW_LABELS = new Set([
+  'total',
+  'totais',
+  'subtotal',
+  'resumo',
+  'soma',
+  'saldo total',
+  'cliente',
+  'nome',
+  'nome do cliente',
+  'cabecalho',
+]);
+
+function isSummaryOrHeaderRow(rawName?: unknown, rawId?: unknown): boolean {
+  const normName = normalizeText(String(rawName ?? ''));
+  const normId = normalizeText(String(rawId ?? ''));
+  if (!normName && !normId) return true;
+  if (
+    SUMMARY_ROW_LABELS.has(normName) ||
+    normName.startsWith('total ') ||
+    normName.startsWith('subtotal ') ||
+    normName.startsWith('saldo total')
+  ) {
+    return true;
+  }
+  if (
+    normId === 'id' ||
+    normId === 'id cliente' ||
+    normId === 'id parcela' ||
+    normId === 'total' ||
+    normId === 'totais'
+  ) {
+    return true;
+  }
+  return false;
+}
+
+function parseMonthKey(raw: unknown): string | undefined {
+  if (raw === null || raw === undefined || typeof raw === 'boolean') {
+    return undefined;
+  }
+  const text = String(raw).trim();
+  if (!text) return undefined;
+  const ymMatch = text.match(/^(\d{4})-(\d{2})$/);
+  if (ymMatch) {
+    const m = Number(ymMatch[2]);
+    return m >= 1 && m <= 12 ? `${ymMatch[1]}-${ymMatch[2]}` : undefined;
+  }
+  const parsed = parseFlexibleDateStrict(raw);
+  if (parsed.ok && parsed.iso) {
+    return parsed.iso.slice(0, 7);
+  }
+  return undefined;
+}
+
+function parseDataConfirmadaField(raw: unknown): {
+  isConfirmed: boolean | undefined;
+  dateResult: StrictDateParseResult;
+} {
+  if (raw === null || raw === undefined) {
+    return {
+      isConfirmed: undefined,
+      dateResult: { ok: true, raw: '', isEmpty: true },
+    };
+  }
+  if (typeof raw === 'boolean') {
+    return {
+      isConfirmed: raw,
+      dateResult: { ok: true, raw: String(raw), isEmpty: true },
+    };
+  }
+  const text = String(raw).trim();
+  if (!text) {
+    return {
+      isConfirmed: undefined,
+      dateResult: { ok: true, raw: '', isEmpty: true },
+    };
+  }
+  const norm = normalizeText(text);
+  if (norm === 'true' || norm === 'sim' || norm === 'verdadeiro') {
+    return {
+      isConfirmed: true,
+      dateResult: { ok: true, raw: text, isEmpty: true },
+    };
+  }
+  if (norm === 'false' || norm === 'nao' || norm === 'falso') {
+    return {
+      isConfirmed: false,
+      dateResult: { ok: true, raw: text, isEmpty: true },
+    };
+  }
+  const dateResult = parseFlexibleDateStrict(raw);
+  return {
+    isConfirmed: dateResult.ok && Boolean(dateResult.iso) ? true : undefined,
+    dateResult,
+  };
+}
+
 function isInstallmentPaid(
   row: AppsScriptInstallmentRow,
   expectedAmount: number,
@@ -185,11 +290,19 @@ function isInstallmentPaid(
 ): boolean {
   const normSit = normalizeText(String(row.situacao ?? ''));
   const explicitNotPaid =
+    normSit.includes('parcial') ||
     normSit.includes('nao pag') ||
     normSit.includes('em aberto') ||
     normSit.includes('pendente') ||
     normSit.includes('atrasad') ||
-    normSit.includes('vencer');
+    normSit.includes('vencer') ||
+    normSit.includes('definir') ||
+    normSit.includes('cancelad');
+
+  // Explicit positive remaining balance (> 0.001) means NOT fully paid (e.g. PARCIAL with R$ 0,01 remaining)
+  if (hasExplicitFalta && faltaAmount > 0.001) {
+    return false;
+  }
 
   if (
     !explicitNotPaid &&
@@ -200,13 +313,13 @@ function isInstallmentPaid(
     return true;
   }
 
-  if (recebidoAmount > 0 && hasExplicitFalta && faltaAmount <= 0.01) {
+  if (recebidoAmount > 0 && hasExplicitFalta && faltaAmount <= 0.001) {
     return true;
   }
   if (
     recebidoAmount > 0 &&
     expectedAmount > 0 &&
-    recebidoAmount >= expectedAmount - 0.01
+    recebidoAmount >= expectedAmount - 0.001
   ) {
     return true;
   }
@@ -319,33 +432,37 @@ export function runPortfolioHealthCheck(
     const hasGenericFallback =
       !rawUrl || rawUrl.endsWith('/my-drive') || rawUrl.endsWith('/my-drive/');
 
-    if (hasGenericFallback) {
-      missingDriveCount += 1;
-      warnings.push({
-        code: 'MISSING_DRIVE_FOLDER',
-        severity: 'warning',
-        source: 'drive',
-        message: `Pasta do cliente "${client.fullName}" não localizada no Google Drive.`,
-      });
-    } else if (!driveUrlValid) {
-      missingDriveCount += 1;
-      warnings.push({
-        code: 'INVALID_DRIVE_URL',
-        severity: 'warning',
-        source: 'drive',
-        message: `URL da pasta no Google Drive inválida ou inacessível ("${rawUrl}").`,
-      });
-    } else if (safeDrive.length > 0 && !driveUrlsSet.has(rawUrl)) {
-      warnings.push({
-        code: 'INVALID_DRIVE_URL',
-        severity: 'info',
-        source: 'drive',
-        message: `URL da pasta do Drive não consta no índice atual de etapas do Drive.`,
-      });
+    if (!client.isCanceled) {
+      if (hasGenericFallback) {
+        missingDriveCount += 1;
+        warnings.push({
+          code: 'MISSING_DRIVE_FOLDER',
+          severity: 'warning',
+          source: 'drive',
+          message: `Pasta do cliente "${client.fullName}" não localizada no Google Drive.`,
+        });
+      } else if (!driveUrlValid) {
+        missingDriveCount += 1;
+        warnings.push({
+          code: 'INVALID_DRIVE_URL',
+          severity: 'warning',
+          source: 'drive',
+          message: `URL da pasta no Google Drive inválida ou inacessível ("${rawUrl}").`,
+        });
+      } else if (safeDrive.length > 0 && !driveUrlsSet.has(rawUrl)) {
+        warnings.push({
+          code: 'INVALID_DRIVE_URL',
+          severity: 'info',
+          source: 'drive',
+          message: `URL da pasta do Drive não consta no índice atual de etapas do Drive.`,
+        });
+      }
     }
 
     // 3. Calendar check: verify active billing events cover all unpaid/pending installments
-    const pendingInstallments = client.installments.filter((i) => !i.paidDate);
+    const pendingInstallments = client.isCanceled
+      ? []
+      : client.installments.filter((i) => !i.paidDate);
     let pendingWithCalendarCount = 0;
     const missingCalendarDueDates: string[] = [];
 
@@ -538,6 +655,9 @@ export function mapAppsScriptPayload(
     }
 
     const modality = resolveModality(c.modalidade);
+    const sheetStatus = String(c.situacao ?? '').trim() || undefined;
+    const isCanceled = normalizeText(sheetStatus ?? '').includes('cancelad');
+
     const regularCountParsed = parseBRLAmountStrict(c.parcelasRegulares);
     if (!regularCountParsed.ok) {
       parseIssues.push({
@@ -552,9 +672,15 @@ export function mapAppsScriptPayload(
     }
     const regularCount = Math.max(0, Math.round(regularCountParsed.value));
 
+    let parcelasRecebidoCents = 0;
+    let undatedRawFaltaCents = 0;
+
     const installments: Installment[] = matchedParcelas
       .map((p, pIdx): Installment | null => {
         consumedParcelas.add(p);
+        if (isSummaryOrHeaderRow(p.cliente, p.idParcela)) {
+          return null;
+        }
         const rowId = String(p.idParcela ?? `${id}-p${pIdx + 1}`).trim();
         try {
           const previstoParsed = parseBRLAmountStrict(p.previsto);
@@ -595,14 +721,22 @@ export function mapAppsScriptPayload(
             });
           }
 
-          const previsto = previstoParsed.ok && previstoParsed.value > 0 ? previstoParsed.value : 0;
-          const recebido = recebidoParsed.ok && recebidoParsed.value > 0 ? recebidoParsed.value : 0;
-          const falta = faltaParsed.ok && faltaParsed.value > 0 ? faltaParsed.value : 0;
+          const previsto =
+            previstoParsed.ok && previstoParsed.value > 0
+              ? previstoParsed.value
+              : 0;
+          const recebido =
+            recebidoParsed.ok && recebidoParsed.value > 0
+              ? recebidoParsed.value
+              : 0;
+          const falta =
+            faltaParsed.ok && faltaParsed.value > 0 ? faltaParsed.value : 0;
           const amount =
             previsto > 0 ? previsto : recebido > 0 ? recebido : falta;
 
-          const hasExplicitFalta =
-            !faltaParsed.isEmpty && faltaParsed.ok;
+          const hasExplicitFalta = !faltaParsed.isEmpty && faltaParsed.ok;
+
+          parcelasRecebidoCents += toCents(recebido);
 
           const paid = isInstallmentPaid(
             p,
@@ -612,9 +746,23 @@ export function mapAppsScriptPayload(
             hasExplicitFalta
           );
 
+          const remainingAmount = paid
+            ? 0
+            : hasExplicitFalta
+              ? falta
+              : fromCents(Math.max(0, toCents(amount) - toCents(recebido)));
+          const receivedAmount = paid
+            ? recebido > 0
+              ? recebido
+              : amount
+            : recebido;
+
           const vencimentoParsed = parseFlexibleDateStrict(p.vencimento);
-          const dataConfirmadaParsed = parseFlexibleDateStrict(p.dataConfirmada);
-          const ultimoPagamentoParsed = parseFlexibleDateStrict(p.ultimoPagamento);
+          const dataConfirmadaInfo = parseDataConfirmadaField(p.dataConfirmada);
+          const dataConfirmadaDate = dataConfirmadaInfo.dateResult;
+          const ultimoPagamentoParsed = parseFlexibleDateStrict(
+            p.ultimoPagamento
+          );
 
           if (!vencimentoParsed.ok && !vencimentoParsed.isEmpty) {
             parseIssues.push({
@@ -627,15 +775,15 @@ export function mapAppsScriptPayload(
               reason: vencimentoParsed.error ?? 'Data de vencimento inválida',
             });
           }
-          if (!dataConfirmadaParsed.ok && !dataConfirmadaParsed.isEmpty) {
+          if (!dataConfirmadaDate.ok && !dataConfirmadaDate.isEmpty) {
             parseIssues.push({
               scope: 'parcela',
               rowId,
               clientId: id,
               clientName: fullName,
               field: 'dataConfirmada',
-              rawValue: dataConfirmadaParsed.raw,
-              reason: dataConfirmadaParsed.error ?? 'Data confirmada inválida',
+              rawValue: dataConfirmadaDate.raw,
+              reason: dataConfirmadaDate.error ?? 'Data confirmada inválida',
             });
           }
           if (!ultimoPagamentoParsed.ok && !ultimoPagamentoParsed.isEmpty) {
@@ -646,29 +794,39 @@ export function mapAppsScriptPayload(
               clientName: fullName,
               field: 'ultimoPagamento',
               rawValue: ultimoPagamentoParsed.raw,
-              reason: ultimoPagamentoParsed.error ?? 'Data de pagamento inválida',
+              reason:
+                ultimoPagamentoParsed.error ?? 'Data de pagamento inválida',
             });
           }
 
           const dueDate =
             (vencimentoParsed.ok ? vencimentoParsed.iso : undefined) ??
-            (dataConfirmadaParsed.ok ? dataConfirmadaParsed.iso : undefined) ??
+            (dataConfirmadaDate.ok ? dataConfirmadaDate.iso : undefined) ??
             (paid && ultimoPagamentoParsed.ok
               ? ultimoPagamentoParsed.iso
               : undefined);
 
-          // Fault isolation: skip corrupted/undated/zero installments without poisoning portfolio totals
-          if (!dueDate || !Number.isFinite(amount) || amount <= 0) {
+          const isUnconfirmedUndated =
+            !dueDate || (dataConfirmadaInfo.isConfirmed === false && !paid);
+
+          if (isUnconfirmedUndated) {
+            if (remainingAmount > 0 && !isCanceled) {
+              undatedRawFaltaCents += toCents(remainingAmount);
+            }
             return null;
           }
 
+          // Fault isolation: skip corrupted/zero installments without poisoning portfolio totals
+          if (!Number.isFinite(amount) || amount <= 0) {
+            return null;
+          }
+
+          const lastPaymentISO = ultimoPagamentoParsed.ok
+            ? ultimoPagamentoParsed.iso
+            : undefined;
           const paidDate = paid
-            ? (ultimoPagamentoParsed.ok
-                ? ultimoPagamentoParsed.iso
-                : undefined) ??
-              (dataConfirmadaParsed.ok
-                ? dataConfirmadaParsed.iso
-                : undefined) ??
+            ? lastPaymentISO ??
+              (dataConfirmadaDate.ok ? dataConfirmadaDate.iso : undefined) ??
               dueDate
             : undefined;
 
@@ -685,8 +843,13 @@ export function mapAppsScriptPayload(
             installmentNumber: pair.number,
             totalInstallments: pair.total,
             amount,
+            receivedAmount,
+            remainingAmount,
             dueDate,
             paidDate,
+            lastPaymentDate: paidDate ?? lastPaymentISO,
+            isDateConfirmed: dataConfirmadaInfo.isConfirmed,
+            rawStatus: String(p.situacao ?? '').trim() || undefined,
             calendarEventId: findMatchingCalendarEventId(
               fullName,
               dueDate,
@@ -721,12 +884,22 @@ export function mapAppsScriptPayload(
       totalInstallments: Math.max(inst.totalInstallments, maxInstallmentTotal),
     }));
 
-    const installmentsSum =
-      Math.round(
-        normalizedInstallments.reduce((sum, inst) => sum + inst.amount, 0) * 100
-      ) / 100;
+    const installmentsSumCents = normalizedInstallments.reduce(
+      (sum, inst) => sum + toCents(inst.amount),
+      0
+    );
+    const installmentsSum = fromCents(installmentsSumCents);
+
+    const datedFaltaCents = normalizedInstallments.reduce(
+      (sum, inst) =>
+        sum + toCents(inst.remainingAmount ?? (inst.paidDate ? 0 : inst.amount)),
+      0
+    );
 
     const totalContratadoParsed = parseBRLAmountStrict(c.totalContratado);
+    const totalPagoParsed = parseBRLAmountStrict(c.totalPago);
+    const saldoRestanteParsed = parseBRLAmountStrict(c.saldoRestante);
+
     if (!totalContratadoParsed.ok) {
       parseIssues.push({
         scope: 'cliente',
@@ -738,11 +911,59 @@ export function mapAppsScriptPayload(
         reason: totalContratadoParsed.error ?? 'Total contratado inválido',
       });
     }
+    if (!totalPagoParsed.ok) {
+      parseIssues.push({
+        scope: 'cliente',
+        rowId: id,
+        clientId: id,
+        clientName: fullName,
+        field: 'totalPago',
+        rawValue: totalPagoParsed.raw,
+        reason: totalPagoParsed.error ?? 'Total pago inválido',
+      });
+    }
+    if (!saldoRestanteParsed.ok) {
+      parseIssues.push({
+        scope: 'cliente',
+        rowId: id,
+        clientId: id,
+        clientName: fullName,
+        field: 'saldoRestante',
+        rawValue: saldoRestanteParsed.raw,
+        reason: saldoRestanteParsed.error ?? 'Saldo restante inválido',
+      });
+    }
 
     const contractedTotal =
       totalContratadoParsed.ok && totalContratadoParsed.value > 0
         ? totalContratadoParsed.value
         : installmentsSum;
+
+    const hasExplicitTotalPago = !totalPagoParsed.isEmpty && totalPagoParsed.ok;
+    const hasExplicitSaldoRestante =
+      !saldoRestanteParsed.isEmpty && saldoRestanteParsed.ok;
+
+    const sheetTotalPaid = hasExplicitTotalPago
+      ? Math.max(0, totalPagoParsed.value)
+      : undefined;
+    const sheetRemainingBalance = isCanceled
+      ? 0
+      : hasExplicitSaldoRestante
+        ? Math.max(0, saldoRestanteParsed.value)
+        : undefined;
+
+    const unlinkedCreditCents =
+      !isCanceled && hasExplicitTotalPago
+        ? Math.max(0, toCents(totalPagoParsed.value) - parcelasRecebidoCents)
+        : 0;
+
+    // Official spreadsheet identity: Saldo total a receber = SUM(Clientes!saldoRestante)
+    // = Parcelas datadas confirmadas + Saldo sem data (líquido de créditos a vincular)
+    const undatedBalanceCents = isCanceled
+      ? 0
+      : hasExplicitSaldoRestante
+        ? Math.max(0, toCents(saldoRestanteParsed.value) - datedFaltaCents)
+        : Math.max(0, undatedRawFaltaCents - unlinkedCreditCents);
 
     const noteParts: string[] = [];
     const entradaParsed = parseBRLAmountStrict(c.entrada);
@@ -797,6 +1018,12 @@ export function mapAppsScriptPayload(
       driveFiles: driveMatch?.arquivos ?? [],
       modality,
       contractedTotal,
+      sheetTotalPaid,
+      sheetRemainingBalance,
+      undatedBalance: fromCents(undatedBalanceCents),
+      unlinkedCredit: fromCents(unlinkedCreditCents),
+      sheetStatus,
+      isCanceled,
       notes: noteParts.length > 0 ? noteParts.join(' · ') : undefined,
       installments: normalizedInstallments,
     };
@@ -805,6 +1032,7 @@ export function mapAppsScriptPayload(
   const baseClients: ClientCase[] = [];
   rawClientes.forEach((c, idx) => {
     if (!c || typeof c !== 'object') return;
+    if (isSummaryOrHeaderRow(c.nome, c.id)) return;
     try {
       const cid = String(c.id ?? '').trim();
       const cname = normalizeText(String(c.nome ?? ''));
@@ -839,6 +1067,7 @@ export function mapAppsScriptPayload(
   const orphanGroups = new Map<string, AppsScriptInstallmentRow[]>();
   for (const p of rawParcelas) {
     if (!p || typeof p !== 'object' || consumedParcelas.has(p)) continue;
+    if (isSummaryOrHeaderRow(p.cliente, p.idParcela)) continue;
     const key =
       String(p.idCliente ?? '').trim() ||
       normalizeText(String(p.cliente ?? '')) ||
@@ -863,6 +1092,238 @@ export function mapAppsScriptPayload(
       )
     );
     orphanIdx += 1;
+  }
+
+  // Parse optional official Pagamentos tab rows (authoritative cash received including credits & late interest)
+  const rawPagamentos: AppsScriptPaymentRow[] = Array.isArray(payload.pagamentos)
+    ? payload.pagamentos
+    : [];
+  const normalizedPayments: AppsScriptPaymentRow[] = [];
+  for (const pay of rawPagamentos) {
+    if (!pay || typeof pay !== 'object') continue;
+    if (isSummaryOrHeaderRow(pay.cliente, pay.idPagamento)) continue;
+    const statusNorm = normalizeText(String(pay.statusRegistro ?? ''));
+    if (
+      statusNorm === 'pendente' ||
+      statusNorm.includes('cancelad') ||
+      statusNorm.includes('estornad') ||
+      statusNorm.includes('inativ') ||
+      statusNorm.includes('excluid')
+    ) {
+      continue;
+    }
+    const valorAtivoParsed =
+      pay.valorAtivo !== undefined && pay.valorAtivo !== ''
+        ? parseBRLAmountStrict(pay.valorAtivo)
+        : parseBRLAmountStrict(pay.valor);
+    if (!valorAtivoParsed.ok || valorAtivoParsed.value <= 0) continue;
+
+    const dataPagParsed = parseFlexibleDateStrict(pay.dataPagamento);
+    const dataPagamentoISO =
+      dataPagParsed.ok && dataPagParsed.iso ? dataPagParsed.iso : undefined;
+    const mesRecebido =
+      parseMonthKey(pay.mesRecebido) ??
+      (dataPagamentoISO ? dataPagamentoISO.slice(0, 7) : undefined);
+
+    normalizedPayments.push({
+      idPagamento: String(pay.idPagamento ?? '').trim() || undefined,
+      dataPagamento: dataPagamentoISO,
+      idCliente: String(pay.idCliente ?? '').trim() || undefined,
+      cliente: String(pay.cliente ?? '').trim() || undefined,
+      valor: parseBRLAmountStrict(pay.valor).value || valorAtivoParsed.value,
+      valorAtivo: valorAtivoParsed.value,
+      meio: String(pay.meio ?? '').trim() || undefined,
+      tipo: String(pay.tipo ?? '').trim() || undefined,
+      idParcela: String(pay.idParcela ?? '').trim() || undefined,
+      observacao: String(pay.observacao ?? '').trim() || undefined,
+      mesRecebido,
+      statusRegistro: String(pay.statusRegistro ?? '').trim() || 'ATIVO',
+    });
+  }
+
+  // Parse optional official Contratos & ZapSign conference tabs (for Google-first reconciliation)
+  const normalizedContracts: AppsScriptContractRow[] = Array.isArray(
+    payload.contratos
+  )
+    ? payload.contratos
+        .filter(
+          (row): row is AppsScriptContractRow =>
+            Boolean(row && typeof row === 'object') &&
+            !isSummaryOrHeaderRow(row.cliente, row.idCliente)
+        )
+        .map((row) => ({
+          idCliente: String(row.idCliente ?? '').trim() || undefined,
+          cliente: String(row.cliente ?? '').trim() || undefined,
+          cpf: String(row.cpf ?? '').trim() || undefined,
+          status: String(row.status ?? '').trim() || undefined,
+          acao: String(row.acao ?? '').trim() || undefined,
+          modalidade: String(row.modalidade ?? '').trim() || undefined,
+          valorTotal: parseBRLAmountStrict(row.valorTotal).value,
+        }))
+    : [];
+
+  const normalizedZapSignRefs: AppsScriptZapSignRefRow[] = Array.isArray(
+    payload.zapsignConferencia
+  )
+    ? payload.zapsignConferencia
+        .filter(
+          (row): row is AppsScriptZapSignRefRow =>
+            Boolean(row && typeof row === 'object') &&
+            !isSummaryOrHeaderRow(row.cliente ?? row.documento, row.idCliente)
+        )
+        .map((row) => ({
+          documento: String(row.documento ?? '').trim() || undefined,
+          cliente: String(row.cliente ?? '').trim() || undefined,
+          cpf: String(row.cpf ?? '').trim() || undefined,
+          status: String(row.status ?? '').trim() || undefined,
+          idCliente: String(row.idCliente ?? '').trim() || undefined,
+          dataAssinatura:
+            parseFlexibleDateStrict(row.dataAssinatura).iso ??
+            (String(row.dataAssinatura ?? '').trim() || undefined),
+        }))
+    : [];
+
+  // Build consolidated official Dashboard snapshot (prefers payload.dashboard from Code.gs when provided)
+  const fallbackMonthKey = _fallbackTodayISO.slice(0, 7);
+  let computedDatedCents = 0;
+  let computedSemDataCents = 0;
+  let computedCreditoCents = 0;
+  let computedRecebidoParcelasCents = 0;
+  let computedRecebidoMesParcelasCents = 0;
+  let computedPrevistoMesCents = 0;
+  let computedFaltaMesCents = 0;
+  let computedAtrasadasCents = 0;
+  let computedAtrasadasCount = 0;
+
+  for (const cli of baseClients) {
+    if (cli.isCanceled) continue;
+    computedSemDataCents += toCents(cli.undatedBalance ?? 0);
+    computedCreditoCents += toCents(cli.unlinkedCredit ?? 0);
+    for (const inst of cli.installments) {
+      const remCents = toCents(
+        inst.remainingAmount ?? (inst.paidDate ? 0 : inst.amount)
+      );
+      const recCents = toCents(
+        inst.receivedAmount ?? (inst.paidDate ? inst.amount : 0)
+      );
+      const amtCents = toCents(inst.amount);
+
+      computedDatedCents += remCents;
+      computedRecebidoParcelasCents += recCents;
+
+      if (inst.dueDate.startsWith(fallbackMonthKey)) {
+        computedPrevistoMesCents += amtCents;
+        computedFaltaMesCents += remCents;
+      }
+      if (recCents > 0) {
+        const payMonth = (
+          inst.paidDate ??
+          inst.lastPaymentDate ??
+          inst.dueDate
+        ).slice(0, 7);
+        if (payMonth === fallbackMonthKey) {
+          computedRecebidoMesParcelasCents += recCents;
+        }
+      }
+      if (remCents > 0 && inst.dueDate < _fallbackTodayISO) {
+        computedAtrasadasCents += remCents;
+        computedAtrasadasCount += 1;
+      }
+    }
+  }
+
+  const computedTotalJaRecebidoCents =
+    normalizedPayments.length > 0
+      ? normalizedPayments.reduce(
+          (sum, pay) => sum + toCents(Number(pay.valorAtivo ?? pay.valor ?? 0)),
+          0
+        )
+      : computedRecebidoParcelasCents + computedCreditoCents;
+
+  const computedRecebidoMesCents =
+    normalizedPayments.length > 0
+      ? normalizedPayments
+          .filter((pay) => pay.mesRecebido === fallbackMonthKey)
+          .reduce(
+            (sum, pay) =>
+              sum + toCents(Number(pay.valorAtivo ?? pay.valor ?? 0)),
+            0
+          )
+      : computedRecebidoMesParcelasCents;
+
+  let officialDashboard: AppsScriptDashboardSnapshot = {
+    mesReferencia: fallbackMonthKey,
+    saldoTotalAReceber: fromCents(computedDatedCents + computedSemDataCents),
+    saldoParcelasDatadas: fromCents(computedDatedCents),
+    saldoSemData: fromCents(computedSemDataCents),
+    creditoAVincular: fromCents(computedCreditoCents),
+    totalJaRecebido: fromCents(computedTotalJaRecebidoCents),
+    recebidoNoMes: fromCents(computedRecebidoMesCents),
+    previstoNoMes: fromCents(computedPrevistoMesCents),
+    parcelasAtrasadasValor: fromCents(computedAtrasadasCents),
+    parcelasAtrasadasCount: computedAtrasadasCount,
+    faltaParcelasMes: fromCents(computedFaltaMesCents),
+    fromOfficialSheetTab: false,
+  };
+
+  if (payload.dashboard && typeof payload.dashboard === 'object') {
+    const d = payload.dashboard;
+    const dTotalReceber = parseBRLAmountStrict(d.saldoTotalAReceber);
+    const dDatadas = parseBRLAmountStrict(d.saldoParcelasDatadas);
+    const dSemData = parseBRLAmountStrict(d.saldoSemData);
+    const dCredito = parseBRLAmountStrict(d.creditoAVincular);
+    const dTotalRecebido = parseBRLAmountStrict(d.totalJaRecebido);
+    const dRecebidoMes = parseBRLAmountStrict(d.recebidoNoMes);
+    const dPrevistoMes = parseBRLAmountStrict(d.previstoNoMes);
+    const dAtrasadas = parseBRLAmountStrict(d.parcelasAtrasadasValor);
+    const dFaltaMes = parseBRLAmountStrict(d.faltaParcelasMes);
+    const dMesRef = parseMonthKey(d.mesReferencia) ?? fallbackMonthKey;
+
+    officialDashboard = {
+      mesReferencia: dMesRef,
+      saldoTotalAReceber:
+        !dTotalReceber.isEmpty && dTotalReceber.ok
+          ? dTotalReceber.value
+          : officialDashboard.saldoTotalAReceber,
+      saldoParcelasDatadas:
+        !dDatadas.isEmpty && dDatadas.ok
+          ? dDatadas.value
+          : officialDashboard.saldoParcelasDatadas,
+      saldoSemData:
+        !dSemData.isEmpty && dSemData.ok
+          ? dSemData.value
+          : officialDashboard.saldoSemData,
+      creditoAVincular:
+        !dCredito.isEmpty && dCredito.ok
+          ? dCredito.value
+          : officialDashboard.creditoAVincular,
+      totalJaRecebido:
+        !dTotalRecebido.isEmpty && dTotalRecebido.ok
+          ? dTotalRecebido.value
+          : officialDashboard.totalJaRecebido,
+      recebidoNoMes:
+        !dRecebidoMes.isEmpty && dRecebidoMes.ok
+          ? dRecebidoMes.value
+          : officialDashboard.recebidoNoMes,
+      previstoNoMes:
+        !dPrevistoMes.isEmpty && dPrevistoMes.ok
+          ? dPrevistoMes.value
+          : officialDashboard.previstoNoMes,
+      parcelasAtrasadasValor:
+        !dAtrasadas.isEmpty && dAtrasadas.ok
+          ? dAtrasadas.value
+          : officialDashboard.parcelasAtrasadasValor,
+      parcelasAtrasadasCount:
+        typeof d.parcelasAtrasadasCount === 'number' &&
+        Number.isFinite(d.parcelasAtrasadasCount)
+          ? Math.round(d.parcelasAtrasadasCount)
+          : officialDashboard.parcelasAtrasadasCount,
+      faltaParcelasMes:
+        !dFaltaMes.isEmpty && dFaltaMes.ok
+          ? dFaltaMes.value
+          : officialDashboard.faltaParcelasMes,
+      fromOfficialSheetTab: true,
+    };
   }
 
   // Triangulation Health Check (Sheets SSOT <-> Drive <-> Calendar)
@@ -892,12 +1353,17 @@ export function mapAppsScriptPayload(
     clients,
     calendarEvents: rawEventosAgenda,
     driveEtapas: normalizedDriveEtapas,
+    officialDashboard,
+    payments: normalizedPayments,
+    contracts: normalizedContracts,
+    zapSignRefs: normalizedZapSignRefs,
     parseIssues,
     healthReport,
     summary: {
       syncedAt: new Date().toISOString(),
       clientesCount: clients.length,
       parcelasCount: totalParcelasMapped,
+      pagamentosCount: normalizedPayments.length,
       driveEtapasCount: rawDriveEtapas.length,
       matchedDriveCount,
       driveFilesCount: totalDriveFilesMapped,

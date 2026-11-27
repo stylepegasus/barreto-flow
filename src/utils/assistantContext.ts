@@ -1,6 +1,8 @@
 import type {
   ActiveTab,
   AppsScriptCalendarEventRow,
+  AppsScriptDashboardSnapshot,
+  AppsScriptPaymentRow,
   ClientCase,
   DataSourceMode,
   DriveFileItem,
@@ -98,6 +100,8 @@ export interface AssistantContextExtras {
     signers: Array<{ name: string }>;
   }>;
   unmatchedZapSignItems?: ZapSignCrossReferenceItem[];
+  officialDashboard?: AppsScriptDashboardSnapshot | null;
+  payments?: AppsScriptPaymentRow[];
 }
 
 const VIEW_LABELS: Record<ActiveTab, string> = {
@@ -176,7 +180,10 @@ export function buildPortfolioContextSummary(
   extras?: AssistantContextExtras
 ): string {
   const activeMonthKey = extras?.selectedMonthKey || todayISO.slice(0, 7);
-  const kpis = calculateDashboardKPIs(clients, todayISO, activeMonthKey);
+  const kpis = calculateDashboardKPIs(clients, todayISO, activeMonthKey, {
+    officialDashboard: extras?.officialDashboard,
+    payments: extras?.payments,
+  });
   const attention = getAttentionTodayList(clients, todayISO);
   const weekEnd = addDaysISO(todayISO, 7);
   const allInstallments = flattenInstallments(clients, todayISO);
@@ -225,10 +232,10 @@ export function buildPortfolioContextSummary(
   }
 
   lines.push(
-    `Total de clientes na carteira: ${clients.length} | Parcelas em aberto: ${openInstallments.length} | Total contratado: ${formatCurrencyBRL(portfolioContracted)} | Total pago acumulado: ${formatCurrencyBRL(portfolioPaid)}`
+    `Total de clientes na carteira: ${clients.length} | Parcelas em aberto: ${openInstallments.length} | Total contratado: ${formatCurrencyBRL(portfolioContracted)} | Total já recebido acumulado: ${formatCurrencyBRL(kpis.totalJaRecebido ?? portfolioPaid)}`
   );
   lines.push(
-    `KPIs do mês em análise (${kpis.selectedMonthKey}): Total a Receber ${formatCurrencyBRL(kpis.totalAReceber)} | Recebido no mês ${formatCurrencyBRL(kpis.recebidoNoMes)} | Previsto no mês ${formatCurrencyBRL(kpis.previstoNoMes)} | Ticket médio ${formatCurrencyBRL(kpis.ticketMedioCarteira)} | Taxa de adimplência ${kpis.taxaAdimplencia.toFixed(1)}% | Em atraso ${kpis.parcelasEmAtrasoCount} parcela(s) (${formatCurrencyBRL(kpis.parcelasEmAtrasoValor)}) | Vencimentos próximos 7 dias ${kpis.vencimentosSemanaCount} parcela(s) (${formatCurrencyBRL(kpis.vencimentosSemanaValor)})`
+    `KPIs do mês em análise (${kpis.selectedMonthKey}): Total a Receber ${formatCurrencyBRL(kpis.totalAReceber)} (Parcelas datadas: ${formatCurrencyBRL(kpis.saldoParcelasDatadas ?? kpis.totalAReceber)} | Saldo sem data: ${formatCurrencyBRL(kpis.saldoSemData ?? 0)}${(kpis.creditoAVincular ?? 0) > 0 ? ` | Crédito a vincular: ${formatCurrencyBRL(kpis.creditoAVincular ?? 0)}` : ''}) | Recebido no mês ${formatCurrencyBRL(kpis.recebidoNoMes)} | Previsto no mês ${formatCurrencyBRL(kpis.previstoNoMes)} | Falta das parcelas do mês ${formatCurrencyBRL(kpis.faltaNoMes ?? 0)} | Ticket médio ${formatCurrencyBRL(kpis.ticketMedioCarteira)} | Taxa de adimplência ${kpis.taxaAdimplencia.toFixed(1)}% | Em atraso ${kpis.parcelasEmAtrasoCount} parcela(s) (${formatCurrencyBRL(kpis.parcelasEmAtrasoValor)}) | Vencimentos próximos 7 dias ${kpis.vencimentosSemanaCount} parcela(s) (${formatCurrencyBRL(kpis.vencimentosSemanaValor)})`
   );
 
   lines.push('');

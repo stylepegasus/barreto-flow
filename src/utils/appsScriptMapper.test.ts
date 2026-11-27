@@ -474,3 +474,158 @@ test('runPortfolioHealthCheck triangulates Sheets SSOT against Drive folder vali
     )
   );
 });
+
+test('mapAppsScriptPayload handles boolean dataConfirmada with zero parseIssues, partial installments, undated balance, unlinked credit, and Pagamentos ledger', () => {
+  const result = mapAppsScriptPayload(
+    {
+      clientes: [
+        {
+          id: 'BA-028',
+          nome: 'Ana Paula Campos Gurgel',
+          totalContratado: 666.68,
+          totalPago: 666.67,
+          saldoRestante: 0.01,
+          situacao: 'EM ATRASO',
+          modalidade: 'Parcelado',
+          parcelasRegulares: 3,
+        },
+        {
+          id: 'BA-079',
+          nome: 'Francisco Vagner',
+          totalContratado: 3000,
+          totalPago: 500,
+          saldoRestante: 2500,
+          situacao: 'SEM VENCIMENTO',
+          modalidade: 'Parcelado',
+          parcelasRegulares: 10,
+        },
+        {
+          id: 'BA-090',
+          nome: 'Cliente Sem Data Confirmada',
+          totalContratado: 2000,
+          totalPago: 0,
+          saldoRestante: 2000,
+          situacao: 'AGUARDANDO',
+          modalidade: 'Parcelado',
+          parcelasRegulares: 4,
+        },
+      ],
+      parcelas: [
+        {
+          idParcela: 'BA-028-03',
+          idCliente: 'BA-028',
+          cliente: 'Ana Paula Campos Gurgel',
+          parcela: '3/3',
+          vencimento: '2026-11-10',
+          previsto: 666.68,
+          recebido: 666.67,
+          faltaReceber: 0.01,
+          situacao: 'PARCIAL',
+          ultimoPagamento: '2026-11-18',
+          dataConfirmada: true,
+        },
+        {
+          idParcela: 'BA-079-01',
+          idCliente: 'BA-079',
+          cliente: 'Francisco Vagner',
+          parcela: '1/10',
+          vencimento: '',
+          previsto: 3000,
+          recebido: 0,
+          faltaReceber: 3000,
+          situacao: 'DEFINIR VENCIMENTO',
+          ultimoPagamento: '',
+          dataConfirmada: false,
+        },
+        {
+          idParcela: 'BA-090-01',
+          idCliente: 'BA-090',
+          cliente: 'Cliente Sem Data Confirmada',
+          parcela: '1/4',
+          vencimento: 'A definir',
+          previsto: 'R$ 2.000,00',
+          recebido: 'R$ 0,00',
+          faltaReceber: 'R$ 2.000,00',
+          situacao: 'SEM DATA',
+          dataConfirmada: false,
+        },
+      ],
+      pagamentos: [
+        {
+          idPagamento: 'PAG-1',
+          cliente: 'Ana Paula Campos Gurgel',
+          idCliente: 'BA-028',
+          idParcela: 'BA-028-03',
+          valor: 666.67,
+          valorAtivo: 666.67,
+          dataPagamento: '2026-11-18',
+          mesRecebido: '2026-11-01',
+          statusRegistro: 'PAGO',
+        },
+        {
+          idPagamento: 'PAG-JUROS',
+          cliente: 'Mayara Lima Gomes',
+          idCliente: 'JUROS',
+          idParcela: 'BA-044-JUROS',
+          valor: 20,
+          valorAtivo: 20,
+          dataPagamento: '2026-11-18',
+          mesRecebido: '2026-11-01',
+          statusRegistro: 'PAGO',
+        },
+        {
+          idPagamento: 'HIST-CRED-BA-079',
+          cliente: 'Francisco Vagner',
+          idCliente: 'BA-079',
+          idParcela: '',
+          valor: 500,
+          valorAtivo: 500,
+          dataPagamento: '',
+          mesRecebido: '2026-09-01',
+          statusRegistro: 'PAGO',
+        },
+        {
+          idPagamento: 'PAG-ESTORNADO',
+          cliente: 'Estorno Teste',
+          idCliente: 'BA-028',
+          valor: 300,
+          valorAtivo: 0,
+          dataPagamento: '2026-11-19',
+          mesRecebido: '2026-11-01',
+          statusRegistro: 'PENDENTE',
+        },
+      ],
+      driveEtapas: [],
+      eventosAgenda: [],
+    },
+    '2026-11-27'
+  );
+
+  // Zero false parse issues from booleans (dataConfirmada) or empty/placeholder cells
+  assert.equal(result.parseIssues.length, 0);
+
+  // Partial installment with R$ 0,01 remaining MUST NOT be marked paid
+  const ana = result.clients.find((c) => c.id === 'BA-028');
+  assert.ok(ana);
+  assert.equal(ana.installments.length, 1);
+  assert.equal(ana.installments[0].paidDate, undefined);
+  assert.equal(ana.installments[0].receivedAmount, 666.67);
+  assert.equal(ana.installments[0].remainingAmount, 0.01);
+  assert.equal(ana.installments[0].lastPaymentDate, '2026-11-18');
+
+  // Unlinked credit and net undated balance reconciled to the exact cent
+  const vagner = result.clients.find((c) => c.id === 'BA-079');
+  assert.ok(vagner);
+  assert.equal(vagner.unlinkedCredit, 500);
+  assert.equal(vagner.undatedBalance, 2500);
+
+  // Official dashboard consolidation matches spreadsheet formulas
+  assert.equal(result.officialDashboard?.saldoParcelasDatadas, 0.01);
+  assert.equal(result.officialDashboard?.saldoSemData, 4500);
+  assert.equal(result.officialDashboard?.saldoTotalAReceber, 4500.01);
+  assert.equal(result.officialDashboard?.creditoAVincular, 500);
+  assert.equal(result.officialDashboard?.recebidoNoMes, 686.67);
+  assert.equal(result.officialDashboard?.totalJaRecebido, 1186.67);
+  assert.equal(result.officialDashboard?.parcelasAtrasadasValor, 0.01);
+  assert.equal(result.payments?.length, 3);
+});

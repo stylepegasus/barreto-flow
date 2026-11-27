@@ -243,9 +243,10 @@ export const ClientsView: React.FC<ClientsViewProps> = ({
                     : 'contratos assinados no ZapSign sem cadastro na planilha'}
                 </h2>
                 <p className="mt-0.5 text-xs text-[#313131]/70">
-                  Coligação ZapSign × Planilha × Google Drive × Google Calendar
-                  (somente status Assinado, excluindo pastas ZZ - Encerrados,
-                  Docs Faltavam e Fechados do Escritório
+                  Coligação soberana Planilha × Google Drive (&ldquo;Clientes
+                  Tráfego Pago&rdquo;) × Google Calendar × ZapSign (deduplicado
+                  por cliente, somente status Assinado, excluindo pastas ZZ -
+                  Encerrados, Docs Faltavam e Fechados do Escritório
                   {proceduralZapSignCount > 0
                     ? `; ${proceduralZapSignCount} documento(s) processuais separados`
                     : ''}

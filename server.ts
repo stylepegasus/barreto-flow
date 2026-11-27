@@ -7,6 +7,7 @@ import { GoogleGenAI } from '@google/genai';
 import type { Content, Part } from '@google/genai';
 import { verifyFirebaseIdTokenAndAllowlist } from './src/utils/serverAuth.ts';
 import { buildDonaSystemPrompt } from './src/utils/assistantContext.ts';
+import type { ZapSignSignedDoc } from './src/types/honorarios.ts';
 import {
   isExcludedZapSignFolder,
   normalizeZapSignDocsPayload,
@@ -33,7 +34,196 @@ const WORKSPACE_CACHE_STALE_TTL_MS = 30 * 60_000;
 const WORKSPACE_CACHE_MAX_ENTRIES = 10;
 const WORKSPACE_FETCH_TIMEOUT_MS = 65_000;
 const ZAPSIGN_FETCH_TIMEOUT_MS = 20_000;
+const ZAPSIGN_LIST_CACHE_TTL_MS = 60_000;
+const ZAPSIGN_SIGNERS_CACHE_MAX_ENTRIES = 600;
+const ZAPSIGN_DETAIL_CONCURRENCY = 10;
+const ZAPSIGN_DETAIL_TIMEOUT_MS = 6_000;
+const ZAPSIGN_ENRICHMENT_BUDGET_MS = 15_000;
 const SHUTDOWN_TIMEOUT_MS = 8_000;
+
+interface ZapSignDocDetailCacheEntry {
+  signers: ZapSignSignedDoc['signers'];
+  signedAt?: string;
+  folderPath?: string;
+  folderName?: string;
+  signedFileUrl?: string;
+}
+
+const zapsignDocDetailCache = new Map<string, ZapSignDocDetailCacheEntry>();
+let zapsignSignedListCache: { docs: ZapSignSignedDoc[]; cachedAt: number } | null =
+  null;
+let zapsignBgWarmupRunning = false;
+
+function storeZapSignDocDetailCache(
+  token: string,
+  entry: ZapSignDocDetailCacheEntry
+) {
+  if (
+    !zapsignDocDetailCache.has(token) &&
+    zapsignDocDetailCache.size >= ZAPSIGN_SIGNERS_CACHE_MAX_ENTRIES
+  ) {
+    const oldestKey = zapsignDocDetailCache.keys().next().value;
+    if (oldestKey) zapsignDocDetailCache.delete(oldestKey);
+  }
+  zapsignDocDetailCache.set(token, entry);
+}
+
+/**
+ * ZapSign's list endpoint (`GET /api/v1/docs/`) omits the `signers` array.
+ * Enriches signed documents with bounded parallel detail calls (`GET /api/v1/docs/{token}/`)
+ * and caches immutable signed-document signers in memory to keep responses fast.
+ */
+async function enrichZapSignDocsWithSigners(
+  docs: ZapSignSignedDoc[],
+  apiToken: string
+): Promise<ZapSignSignedDoc[]> {
+  const deadline = Date.now() + ZAPSIGN_ENRICHMENT_BUDGET_MS;
+  const needsFetch: ZapSignSignedDoc[] = [];
+
+  for (const doc of docs) {
+    if (doc.signers.length > 0) continue;
+    const cached = zapsignDocDetailCache.get(doc.token);
+    if (cached) {
+      doc.signers = cached.signers;
+      if (cached.signedAt) doc.signedAt = cached.signedAt;
+      if (cached.folderPath && !doc.folderPath) doc.folderPath = cached.folderPath;
+      if (cached.folderName && !doc.folderName) doc.folderName = cached.folderName;
+      if (cached.signedFileUrl && !doc.signedFileUrl) {
+        doc.signedFileUrl = cached.signedFileUrl;
+      }
+    } else {
+      needsFetch.push(doc);
+    }
+  }
+
+  if (needsFetch.length > 0) {
+    let cursor = 0;
+    const workerCount = Math.min(ZAPSIGN_DETAIL_CONCURRENCY, needsFetch.length);
+
+    const runWorker = async () => {
+      while (cursor < needsFetch.length && Date.now() < deadline) {
+        const idx = cursor++;
+        const doc = needsFetch[idx];
+        const remainingMs = deadline - Date.now();
+        if (remainingMs <= 500) break;
+
+        const controller = new AbortController();
+        const timer = setTimeout(
+          () => controller.abort(),
+          Math.min(ZAPSIGN_DETAIL_TIMEOUT_MS, remainingMs)
+        );
+        try {
+          const detailRes = await fetch(
+            `https://api.zapsign.com.br/api/v1/docs/${encodeURIComponent(doc.token)}/`,
+            {
+              method: 'GET',
+              headers: {
+                Authorization: `Bearer ${apiToken}`,
+                Accept: 'application/json',
+              },
+              signal: controller.signal,
+            }
+          );
+          if (!detailRes.ok) continue;
+          const detailJson = (await detailRes.json()) as Record<string, unknown>;
+          const normalized = normalizeZapSignDocsPayload([detailJson])[0];
+          if (normalized) {
+            doc.signers = normalized.signers;
+            if (normalized.signedAt) doc.signedAt = normalized.signedAt;
+            if (normalized.folderPath && !doc.folderPath) {
+              doc.folderPath = normalized.folderPath;
+            }
+            if (normalized.folderName && !doc.folderName) {
+              doc.folderName = normalized.folderName;
+            }
+            if (normalized.signedFileUrl && !doc.signedFileUrl) {
+              doc.signedFileUrl = normalized.signedFileUrl;
+            }
+            storeZapSignDocDetailCache(doc.token, {
+              signers: normalized.signers,
+              signedAt: normalized.signedAt,
+              folderPath: normalized.folderPath,
+              folderName: normalized.folderName,
+              signedFileUrl: normalized.signedFileUrl,
+            });
+          }
+        } catch {
+          // Best-effort enrichment; keep list-level doc if a detail lookup times out
+        } finally {
+          clearTimeout(timer);
+        }
+      }
+    };
+
+    await Promise.all(Array.from({ length: workerCount }, () => runWorker()));
+
+    // If the foreground budget ended before every uncached doc was enriched,
+    // warm the remaining immutable signed docs in the background and invalidate the list cache.
+    if (cursor < needsFetch.length && !zapsignBgWarmupRunning) {
+      const remainingDocs = needsFetch.slice(cursor);
+      zapsignBgWarmupRunning = true;
+      void (async () => {
+        try {
+          let bgCursor = 0;
+          const bgWorkers = Math.min(4, remainingDocs.length);
+          const runBgWorker = async () => {
+            while (bgCursor < remainingDocs.length) {
+              const doc = remainingDocs[bgCursor++];
+              if (zapsignDocDetailCache.has(doc.token)) continue;
+              const controller = new AbortController();
+              const timer = setTimeout(
+                () => controller.abort(),
+                ZAPSIGN_DETAIL_TIMEOUT_MS
+              );
+              try {
+                const detailRes = await fetch(
+                  `https://api.zapsign.com.br/api/v1/docs/${encodeURIComponent(doc.token)}/`,
+                  {
+                    method: 'GET',
+                    headers: {
+                      Authorization: `Bearer ${apiToken}`,
+                      Accept: 'application/json',
+                    },
+                    signal: controller.signal,
+                  }
+                );
+                if (!detailRes.ok) continue;
+                const detailJson = (await detailRes.json()) as Record<
+                  string,
+                  unknown
+                >;
+                const normalized = normalizeZapSignDocsPayload([detailJson])[0];
+                if (normalized) {
+                  storeZapSignDocDetailCache(doc.token, {
+                    signers: normalized.signers,
+                    signedAt: normalized.signedAt,
+                    folderPath: normalized.folderPath,
+                    folderName: normalized.folderName,
+                    signedFileUrl: normalized.signedFileUrl,
+                  });
+                }
+              } catch {
+                // ignore background fetch errors
+              } finally {
+                clearTimeout(timer);
+              }
+            }
+          };
+          await Promise.all(
+            Array.from({ length: bgWorkers }, () => runBgWorker())
+          );
+          zapsignSignedListCache = null;
+        } finally {
+          zapsignBgWarmupRunning = false;
+        }
+      })();
+    }
+  }
+
+  return docs.filter(
+    (doc) => !isExcludedZapSignFolder(doc.folderPath, doc.folderName)
+  );
+}
 
 interface ServerWorkspaceCacheEntry {
   data: EnrichedAppsScriptSyncResult;
@@ -436,7 +626,7 @@ async function startServer() {
     }
   });
 
-  app.get('/api/zapsign/signed', requireAuthorizedUser, async (_req, res) => {
+  app.get('/api/zapsign/signed', requireAuthorizedUser, async (req, res) => {
     const token = process.env.ZAPSIGN_API_TOKEN?.trim();
     if (!token || token === 'MY_ZAPSIGN_API_TOKEN') {
       res.json({
@@ -447,8 +637,23 @@ async function startServer() {
       return;
     }
 
+    const forceRefresh =
+      req.query.force === 'true' || req.query.force === '1';
+    if (
+      !forceRefresh &&
+      zapsignSignedListCache &&
+      Date.now() - zapsignSignedListCache.cachedAt <= ZAPSIGN_LIST_CACHE_TTL_MS
+    ) {
+      res.setHeader('X-Cache', 'HIT');
+      res.json({
+        configured: true,
+        docs: zapsignSignedListCache.docs,
+      });
+      return;
+    }
+
     try {
-      const signedDocs: ReturnType<typeof normalizeZapSignDocsPayload> = [];
+      const signedDocs: ZapSignSignedDoc[] = [];
 
       let nextUrl: string | null = 'https://api.zapsign.com.br/api/v1/docs/';
       let pageCount = 0;
@@ -511,9 +716,16 @@ async function startServer() {
             : null;
       }
 
+      const enrichedDocs = await enrichZapSignDocsWithSigners(signedDocs, token);
+      zapsignSignedListCache = {
+        docs: enrichedDocs,
+        cachedAt: Date.now(),
+      };
+
+      res.setHeader('X-Cache', 'MISS');
       res.json({
         configured: true,
-        docs: signedDocs,
+        docs: enrichedDocs,
       });
     } catch (err: unknown) {
       console.error(

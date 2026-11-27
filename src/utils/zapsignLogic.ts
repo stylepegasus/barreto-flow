@@ -1,6 +1,8 @@
 import type {
   AppsScriptCalendarEventRow,
+  AppsScriptContractRow,
   AppsScriptDriveEtapaRow,
+  AppsScriptZapSignRefRow,
   ClientCase,
   ZapSignAuditStatus,
   ZapSignCalendarMatchInfo,
@@ -121,9 +123,18 @@ const GENERIC_NON_NAME_WORDS = new Set([
   'inicial',
   'emenda',
   'hipossuficiencia',
+  'hipossuficioencia',
   'justica',
   'gratuita',
+  'gratuidade',
+  'isencao',
   'ciencia',
+  'corrigida',
+  'corrigido',
+  'revisada',
+  'revisado',
+  'prisao',
+  'bloqueio',
   'ads',
   'padrao',
   'cliente',
@@ -140,6 +151,36 @@ const GENERIC_NON_NAME_WORDS = new Set([
   'pdf',
   'docx',
   'doc',
+]);
+
+const AMBIGUOUS_SHORT_FIRST_NAMES = new Set([
+  'ana',
+  'joao',
+  'jose',
+  'maria',
+  'luis',
+  'luiz',
+  'paulo',
+  'pedro',
+  'lucas',
+  'carlos',
+  'marcos',
+  'paula',
+  'carla',
+  'julia',
+  'clara',
+  'alice',
+  'laura',
+  'bruno',
+  'diego',
+  'fabio',
+  'andre',
+  'tiago',
+  'vitor',
+  'sara',
+  'lara',
+  'rosa',
+  'rita',
 ]);
 
 const PLACEHOLDER_PHONES = new Set([
@@ -474,17 +515,17 @@ const LEGAL_PREFIX_PATTERNS: RegExp[] = [
   /^procura[çc][aã]o\s*(?:e|\+|&|,)\s*contrato\b/i,
   /^contrato\s*(?:e|\+|&|,)\s*procura[çc][aã]o\b/i,
   /^termo\s+de\s+ci[êe]ncia(?:\s+e\s+responsabilidade)?\b/i,
-  /^declara[çc][aã]o\s+de\s+hipossufici[êe]ncia(?:\s+econ[ôo]mica)?\b/i,
+  /^declara[çc][aã]o\s+de\s+hipossufici[êeo]*ncia(?:\s+econ[ôo]mica)?\b/i,
   /^declara[çc][aã]o\s+de\s+justi[çc]a\s+gratuita\b/i,
   /^aditivo\s+(?:de\s+|ao\s+)?contrato(?:\s+de\s+honor[aá]rios)?\b/i,
-  /^(?:processo|contrato|contratos|procura[çc][aã]o|procura[çc][oõ]es|declara[çc][oõ]es|declara[çc][aã]o|distrato|substabelecimento|assinatura|aditivo|aditamento|termo|honor[aá]rios)\b/i,
+  /^(?:processo|contrato|contratos|procura[çc][aã]o|procura[çc][oõ]es|declara[çc][oõ]es|declara[çc][aã]o|hipossufici[êeo]*ncia|distrato|substabelecimento|assinatura|aditivo|aditamento|termo|honor[aá]rios)\b/i,
   // Strip dangling connectors when chaining prefixes (e.g. "Contrato de Honorários e Procuração - Nome")
-  /^(?:e|de|da|do|das|dos)\s+(?=(?:contrato|procura[çc]|declara[çc]|termo|honor[aá]rio|presta[çc]|aditivo|distrato|substabelecimento|assinatura|hipossufici[êe]ncia|ci[êe]ncia|justi[çc]a))/i,
+  /^(?:e|de|da|do|das|dos)\s+(?=(?:contrato|procura[çc]|declara[çc]|termo|honor[aá]rio|presta[çc]|aditivo|distrato|substabelecimento|assinatura|hipossufici[êeo]*ncia|ci[êe]ncia|justi[çc]a))/i,
 ];
 
 /**
  * Cleans ZapSign document titles by removing file extensions, copy counters,
- * CNJ process numbers, leading punctuation, and compound/chained legal prefixes/suffixes.
+ * CNJ process numbers, underscores, leading punctuation, and compound/chained legal prefixes/suffixes.
  */
 export function cleanZapSignDocumentTitle(docName: string): string {
   let text = String(docName ?? '').trim();
@@ -503,6 +544,10 @@ export function cleanZapSignDocumentTitle(docName: string): string {
 
   // Remove CNJ process numbers (e.g. 0726687-33.2026.8.07.0020)
   text = text.replace(/\b\d{7}-\d{2}\.\d{4}\.\d\.\d{2}\.\d{4}\b/g, ' ');
+
+  // Normalize underscores to spaces so word-boundary legal prefix regexes match filenames like
+  // "Contrato_Procuracao_Declaracoes_Gilmara_Caio_Matheus"
+  text = text.replace(/_+/g, ' ').replace(/\s{2,}/g, ' ').trim();
 
   // Iteratively strip leading separators and legal prefixes (chained combos supported)
   let changed = true;
@@ -528,7 +573,7 @@ export function cleanZapSignDocumentTitle(docName: string): string {
     const before = text;
     text = text
       .replace(
-        /\s*[-–—_|/]\s*(assinatura|assinado|assinada|final|c[oó]pia|ads\s*fam[ií]lia)\s*$/i,
+        /\s*[-–—_|/]\s*(assinatura|assinado|assinada|final|c[oó]pia|ads\s*fam[ií]lia|corrigid[oa]|revisad[oa]|atualizad[oa])\s*$/i,
         ''
       )
       .replace(
@@ -623,9 +668,9 @@ export function stripDriveFolderDecorators(folderName: string): string {
     )
     // Strip parenthetical tags like "(Família)", "(Ads)", "(Encerrado)"
     .replace(/\s*\([^)]*\)\s*/g, ' ')
-    // Strip trailing legal area/action descriptors separated by dash/pipe/underscore
+    // Strip trailing legal area/action or operational descriptors separated by dash/pipe/underscore
     .replace(
-      /\s*[-–—_|/]\s*(div[oó]rcio|pens[aã]o|guarda|alimentos|invent[aá]rio|fam[ií]lia|regulamenta[çc][aã]o|uni[aã]o|curatela|interdi[çc][aã]o|partilha|execu[çc][aã]o|revisional|exonera[çc][aã]o|paternidade|ads|c[ií]vel|trabalhista).*$/i,
+      /\s*[-–—_|/]\s*(div[oó]rcio|pens[aã]o|guarda|alimentos|invent[aá]rio|fam[ií]lia|regulamenta[çc][aã]o|uni[aã]o|curatela|interdi[çc][aã]o|partilha|execu[çc][aã]o|revisional|exonera[çc][aã]o|paternidade|ads|c[ií]vel|trabalhista|corrigid[oa]|revisad[oa]|atualizad[oa]|pris[aã]o|bloqueio|cumprimento|carlos|luis|lu[ií]s|gilmar|paulo).*$/i,
       ''
     )
     .replace(/\s{2,}/g, ' ')
@@ -750,17 +795,10 @@ function tokensEqualWithTolerance(a: string, b: string): boolean {
   const pb = phoneticNormalizeToken(b);
   if (pa === pb) return true;
 
-  // Bounded typo tolerance (1 edit / adjacent transposition) while preventing gender-pair collisions like Maria/Mario
+  // Bounded typo tolerance (1 edit / adjacent transposition) ONLY on >= 6-char phonetic stems
+  // to avoid 5-letter false collisions like "maria" <-> "marcia" or "mario"
   const minLen = Math.min(pa.length, pb.length);
   if (minLen >= 6 && pa[0] === pb[0] && damerauLevenshteinDistance(pa, pb) <= 1) {
-    return true;
-  }
-  if (
-    minLen === 5 &&
-    pa[0] === pb[0] &&
-    pa[pa.length - 1] === pb[pb.length - 1] &&
-    damerauLevenshteinDistance(pa, pb) <= 1
-  ) {
     return true;
   }
   return false;
@@ -874,7 +912,8 @@ export function evaluateNameMatch(
     }
   }
 
-  // 6. Distinctive first-name match for split multi-person co-holders (e.g. "Rainara" -> "Rainara Oliveira Santos")
+  // 6. Distinctive first-name match for split multi-person co-holders or single-name titles
+  // (e.g. "Rainara" -> "Rainara Oliveira Santos", "Kátia" -> "Kátia Maria...")
   if (options?.allowDistinctiveSingleName) {
     const singleSide =
       tokensA.length === 1 && tokensB.length >= 2
@@ -885,13 +924,15 @@ export function evaluateNameMatch(
 
     if (
       singleSide &&
-      singleSide.single.length >= 5 &&
+      singleSide.single.length >= 4 &&
       !COMMON_SURNAME_TOKENS.has(singleSide.single) &&
+      !AMBIGUOUS_SHORT_FIRST_NAMES.has(singleSide.single) &&
       tokensEqualWithTolerance(singleSide.single, singleSide.multi[0])
     ) {
+      const isExactFirstToken = singleSide.single === singleSide.multi[0];
       return {
         matched: true,
-        score: 76,
+        score: isExactFirstToken ? 79 : 76,
         reason: `Co-titular identificado pelo primeiro nome (${singleSide.single})`,
         isCoHolderSingleName: true,
       };
@@ -967,14 +1008,39 @@ function getCandidateNameEntries(
   };
 
   // 1. Prioritize non-firm signers from ZapSign API
-  for (const s of getClientSigners(doc)) {
+  const clientSigners = getClientSigners(doc);
+  for (const s of clientSigners) {
     pushUnique(s.name, 'signer', false);
   }
 
   // 2. Individual co-holders extracted from cleaned document title
   const isMultiHolderTitle = titleInfo.extractedNames.length >= 2;
+  const isSingleTokenTitleWithoutSigner =
+    clientSigners.length === 0 &&
+    titleInfo.extractedNames.length === 1 &&
+    normalizePersonTokens(titleInfo.extractedNames[0]).length === 1;
+
   for (const individual of titleInfo.extractedNames) {
-    pushUnique(individual, 'title_split', isMultiHolderTitle);
+    pushUnique(
+      individual,
+      'title_split',
+      isMultiHolderTitle || isSingleTokenTitleWithoutSigner
+    );
+  }
+
+  // 2b. Underscore-encoded multi-person filenames without commas/connectors
+  // (e.g. "Contrato_Procuracao_Declaracoes_Gilmara_Caio_Matheus.docx") when signers are absent
+  if (
+    clientSigners.length === 0 &&
+    /_/.test(titleInfo.rawTitle) &&
+    titleInfo.extractedNames.length === 1
+  ) {
+    const firstTokens = normalizePersonTokens(titleInfo.extractedNames[0]).filter(
+      (t) => !GENERIC_NON_NAME_WORDS.has(t)
+    );
+    if (firstTokens.length >= 2 && firstTokens[0].length >= 4) {
+      pushUnique(firstTokens[0], 'title_split', true);
+    }
   }
 
   // 3. Full normalized title
@@ -1098,9 +1164,13 @@ function matchDocToSheetClients(
   }
 
   // Ambiguity safeguard: if multiple distinct clients match ONLY via single-name co-holder heuristic
-  // without a higher-confidence match, avoid linking blindly to the wrong person.
+  // without a higher-confidence match, keep ONLY a unique strictly-highest winner (e.g. exact "Larissa" 79 vs phonetic "Laryssa" 76).
   const strongMatches = matches.filter((m) => m.criteria !== 'co_holder');
   if (strongMatches.length === 0 && matches.length > 1) {
+    const sorted = [...matches].sort((a, b) => b.score - a.score);
+    if (sorted[0].score > sorted[1].score) {
+      return [sorted[0]];
+    }
     return [];
   }
 
@@ -1455,11 +1525,130 @@ function buildDiagnosticObject(params: {
   };
 }
 
+export interface ZapSignMatchOptions {
+  contracts?: AppsScriptContractRow[];
+  zapSignRefs?: AppsScriptZapSignRefRow[];
+}
+
+interface ReferenceSheetMatch {
+  sourceLabel: 'Contratos' | 'ZapSign';
+  clientName: string;
+  clientId?: string;
+  isClosedOrCanceled: boolean;
+  score: number;
+  reason: string;
+}
+
+function matchDocToReferenceTabs(
+  doc: ZapSignSignedDoc,
+  candidates: CandidateNameEntry[],
+  options?: ZapSignMatchOptions
+): ReferenceSheetMatch | undefined {
+  const clientSigners = getClientSigners(doc);
+  const signerCpfs = clientSigners
+    .map((s) => normalizeCPF(s.cpf))
+    .filter((v): v is string => Boolean(v));
+  const normDocTitle = normalizeRobustString(doc.name);
+
+  // 1. Official "ZapSign" conference tab in the spreadsheet
+  if (Array.isArray(options?.zapSignRefs) && options.zapSignRefs.length > 0) {
+    for (const ref of options.zapSignRefs) {
+      if (!ref) continue;
+      const refStatusNorm = normalizeText(ref.status ?? '');
+      const isClosed =
+        refStatusNorm.includes('cancelad') ||
+        refStatusNorm.includes('encerrad') ||
+        refStatusNorm.includes('desist');
+      const refCpf = normalizeCPF(ref.cpf);
+      if (refCpf && signerCpfs.includes(refCpf)) {
+        return {
+          sourceLabel: 'ZapSign',
+          clientName: ref.cliente || ref.documento || doc.name,
+          clientId: ref.idCliente,
+          isClosedOrCanceled: isClosed,
+          score: 100,
+          reason: 'CPF conferido na aba ZapSign da planilha',
+        };
+      }
+      if (ref.documento && normalizeRobustString(ref.documento) === normDocTitle) {
+        return {
+          sourceLabel: 'ZapSign',
+          clientName: ref.cliente || ref.documento,
+          clientId: ref.idCliente,
+          isClosedOrCanceled: isClosed,
+          score: 98,
+          reason: 'Documento conferido na aba ZapSign da planilha',
+        };
+      }
+      if (ref.cliente) {
+        for (const cand of candidates) {
+          const detail = evaluateNameMatch(ref.cliente, cand.name, {
+            allowDistinctiveSingleName: cand.allowSingleName,
+          });
+          if (detail.matched && detail.score >= 82) {
+            return {
+              sourceLabel: 'ZapSign',
+              clientName: ref.cliente,
+              clientId: ref.idCliente,
+              isClosedOrCanceled: isClosed,
+              score: detail.score,
+              reason: `${detail.reason} (aba ZapSign da planilha)`,
+            };
+          }
+        }
+      }
+    }
+  }
+
+  // 2. Official "Contratos" tab in the spreadsheet (includes active, quitados, encerrados, and cancelados)
+  if (Array.isArray(options?.contracts) && options.contracts.length > 0) {
+    let best: ReferenceSheetMatch | undefined;
+    for (const contract of options.contracts) {
+      if (!contract || !contract.cliente) continue;
+      const statusNorm = normalizeText(contract.status ?? '');
+      const isClosed =
+        statusNorm.includes('cancelad') ||
+        statusNorm.includes('encerrad') ||
+        statusNorm.includes('desist');
+      const contractCpf = normalizeCPF(contract.cpf);
+      if (contractCpf && signerCpfs.includes(contractCpf)) {
+        return {
+          sourceLabel: 'Contratos',
+          clientName: contract.cliente,
+          clientId: contract.idCliente,
+          isClosedOrCanceled: isClosed,
+          score: 100,
+          reason: 'CPF conferido na aba Contratos da planilha',
+        };
+      }
+      for (const cand of candidates) {
+        const detail = evaluateNameMatch(contract.cliente, cand.name, {
+          allowDistinctiveSingleName: cand.allowSingleName,
+        });
+        if (detail.matched && (!best || detail.score > best.score)) {
+          best = {
+            sourceLabel: 'Contratos',
+            clientName: contract.cliente,
+            clientId: contract.idCliente,
+            isClosedOrCanceled: isClosed,
+            score: detail.score,
+            reason: `${detail.reason} (aba Contratos da planilha)`,
+          };
+        }
+      }
+    }
+    if (best) return best;
+  }
+
+  return undefined;
+}
+
 function reconcileSingleDocument(
   doc: ZapSignSignedDoc,
   clients: ClientCase[],
   driveEtapas: AppsScriptDriveEtapaRow[],
-  calendarEvents: AppsScriptCalendarEventRow[]
+  calendarEvents: AppsScriptCalendarEventRow[],
+  options?: ZapSignMatchOptions
 ): DocumentReconciliationOutput {
   const rawSignersCount = Array.isArray(doc.signers) ? doc.signers.length : 0;
   const titleInfo = normalizeZapSignTitle(doc.name);
@@ -1531,26 +1720,46 @@ function reconcileSingleDocument(
     return { item, diagnostic, sheetMatches: [] };
   }
 
-  // 2. Match against Google Sheets (`clients`)
+  // 2. Match against Google Sheets (`clients`, plus optional `contratos` & `zapsignConferencia` tabs)
   let sheetMatches = matchDocToSheetClients(doc, candidates, clients);
   let primarySheetMatch = sheetMatches[0];
   let primaryMatchedClient = primarySheetMatch?.client;
 
-  // 3. Match against Google Drive (`driveEtapas`)
+  const refSheetMatch =
+    sheetMatches.length === 0
+      ? matchDocToReferenceTabs(doc, candidates, options)
+      : undefined;
+  if (refSheetMatch?.clientId) {
+    const linkedByRefId = clients.find((c) => c.id === refSheetMatch.clientId);
+    if (linkedByRefId) {
+      sheetMatches = [
+        {
+          client: linkedByRefId,
+          score: refSheetMatch.score,
+          criteria: 'name',
+          reason: refSheetMatch.reason,
+        },
+      ];
+      primarySheetMatch = sheetMatches[0];
+      primaryMatchedClient = linkedByRefId;
+    }
+  }
+
+  // 3. Match against Google Drive (`driveEtapas` from "Clientes Tráfego Pago")
   const driveMatch = findMatchingDriveFolder(
     candidates,
     driveEtapas,
-    primaryMatchedClient?.fullName
+    primaryMatchedClient?.fullName ?? refSheetMatch?.clientName
   );
   let driveFolder = driveMatch?.folder;
 
   // 3b. Transitive Drive-assisted Sheets reconciliation:
-  // If ZapSign didn't match Sheets directly, but matched a non-excluded Drive folder with high confidence,
-  // cross-check the cleaned Drive folder name against Sheets (requiring strong full-name match >= 88).
+  // If ZapSign didn't match Sheets directly, but matched a non-excluded Drive folder,
+  // cross-check the cleaned Drive folder name against Sheets.
   if (
     sheetMatches.length === 0 &&
     driveMatch &&
-    driveMatch.score >= 82 &&
+    driveMatch.score >= 76 &&
     !driveMatch.folder.isExcludedFolder
   ) {
     const driveCleanName = stripDriveFolderDecorators(driveMatch.folder.nomePasta);
@@ -1559,7 +1768,7 @@ function reconcileSingleDocument(
         doc,
         [{ name: driveCleanName, source: 'signer', allowSingleName: false }],
         clients
-      ).filter((m) => m.score >= 88);
+      ).filter((m) => m.score >= 82);
 
       if (assistedMatches.length === 1) {
         sheetMatches = [
@@ -1602,15 +1811,15 @@ function reconcileSingleDocument(
   const calendarMatch = calendarDetail?.info;
 
   const matchedSources: ZapSignSourceName[] = [];
-  if (sheetMatches.length > 0) matchedSources.push('Sheets');
+  if (sheetMatches.length > 0 || refSheetMatch) matchedSources.push('Sheets');
   if (driveFolder) matchedSources.push('Drive');
   if (calendarMatch) matchedSources.push('Calendar');
 
-  // 5. Check Drive / Client rigid excluded or closed archive status
+  // 5. Check Drive / Client / Contract rigid excluded or closed archive status
   const isDriveExcluded = Boolean(driveFolder?.isExcludedFolder);
-  const isClosedClient = sheetMatches.some((m) =>
-    isClientClosedOrCanceled(m.client)
-  );
+  const isClosedClient =
+    sheetMatches.some((m) => isClientClosedOrCanceled(m.client)) ||
+    Boolean(refSheetMatch?.isClosedOrCanceled);
   const isClosed = Boolean(driveFolder?.isClosed) || isClosedClient;
 
   if (isClosed || isDriveExcluded) {
@@ -1688,9 +1897,14 @@ function reconcileSingleDocument(
     isClosedArchive: false,
   };
 
-  // 6. Matched in Sheets -> reconciled!
-  if (sheetMatches.length > 0 && primarySheetMatch) {
-    const reasons = [primarySheetMatch.reason];
+  // 6. Matched in Sheets (`Clientes`, `Contratos`, or `ZapSign` tab) -> reconciled!
+  if ((sheetMatches.length > 0 && primarySheetMatch) || refSheetMatch) {
+    const resolvedScore = primarySheetMatch?.score ?? refSheetMatch?.score ?? 90;
+    const resolvedReasonBase =
+      primarySheetMatch?.reason ??
+      refSheetMatch?.reason ??
+      'Validado na planilha oficial';
+    const reasons = [resolvedReasonBase];
     if (driveFolder) reasons.push(`Drive: ${driveFolder.etapa}`);
     if (calendarMatch) {
       reasons.push(`Calendar: ${calendarMatch.eventCount} evento(s)`);
@@ -1712,7 +1926,7 @@ function reconcileSingleDocument(
       matchedSources,
       auditStatus: 'matched_spreadsheet',
       linkageStatus: 'vinculado_planilha',
-      matchScore: primarySheetMatch.score,
+      matchScore: resolvedScore,
       matchReason,
     });
 
@@ -1722,12 +1936,13 @@ function reconcileSingleDocument(
       auditStatus: 'matched_spreadsheet',
       linkageStatus: 'vinculado_planilha',
       matchedSources,
-      matchedClientId: primarySheetMatch.client.id,
-      matchedClientName: primarySheetMatch.client.fullName,
-      matchScore: primarySheetMatch.score,
+      matchedClientId: primarySheetMatch?.client.id ?? refSheetMatch?.clientId,
+      matchedClientName:
+        primarySheetMatch?.client.fullName ?? refSheetMatch?.clientName,
+      matchScore: resolvedScore,
       matchReason,
       inSpreadsheet: true,
-      matchedClient: primarySheetMatch.client,
+      matchedClient: primarySheetMatch?.client,
       driveFolder,
       calendarMatch,
       extractedProfile,
@@ -1778,6 +1993,54 @@ function reconcileSingleDocument(
       linkageStatus,
       matchedSources,
       matchScore,
+      matchReason,
+      inSpreadsheet: false,
+      driveFolder,
+      calendarMatch,
+      extractedProfile,
+      diagnostic,
+    };
+
+    return { item, diagnostic, sheetMatches: [] };
+  }
+
+  // 7b. Google Ecosystem Sovereignty:
+  // If client already has a valid active folder inside "Clientes Tráfego Pago" in Google Drive,
+  // consider the contract coligado & validated in the Google ecosystem and remove from ZapSign pending queue.
+  if (driveMatch && driveFolder && !driveFolder.isExcludedFolder && driveMatch.score >= 76) {
+    const ecoReasons = [
+      `Validado no ecossistema Google (Pasta Drive "${driveFolder.nomePasta}" · ${driveFolder.etapa})`,
+    ];
+    if (calendarDetail) {
+      ecoReasons.push(calendarDetail.reason);
+    }
+    const matchReason = ecoReasons.join(' · ');
+
+    const diagnostic = buildDiagnosticObject({
+      doc,
+      titleInfo,
+      primarySignerName,
+      extractedProfile,
+      clientSignersCount: clientSigners.length,
+      ignoredFirmSignersCount,
+      folderExclusion: noExclusion,
+      driveFolder,
+      driveMatch,
+      calendarDetail,
+      matchedSources,
+      auditStatus: 'matched_google_ecosystem',
+      linkageStatus: 'vinculado_drive_ou_agenda_sem_planilha',
+      matchScore: driveMatch.score,
+      matchReason,
+    });
+
+    const item: ZapSignCrossReferenceItem = {
+      doc,
+      primarySignerName,
+      auditStatus: 'matched_google_ecosystem',
+      linkageStatus: 'vinculado_drive_ou_agenda_sem_planilha',
+      matchedSources,
+      matchScore: driveMatch.score,
       matchReason,
       inSpreadsheet: false,
       driveFolder,
@@ -1848,16 +2111,23 @@ export function diagnoseZapSignDocument(
   doc: ZapSignSignedDoc,
   clients: ClientCase[],
   driveEtapas: AppsScriptDriveEtapaRow[] = [],
-  calendarEvents: AppsScriptCalendarEventRow[] = []
+  calendarEvents: AppsScriptCalendarEventRow[] = [],
+  options?: ZapSignMatchOptions
 ): ZapSignDocumentDiagnostic {
-  return reconcileSingleDocument(doc, clients, driveEtapas, calendarEvents)
-    .diagnostic;
+  return reconcileSingleDocument(
+    doc,
+    clients,
+    driveEtapas,
+    calendarEvents,
+    options
+  ).diagnostic;
 }
 
 export interface ZapSignMatchResult {
   matchedByClientId: Record<string, ZapSignSignedDoc[]>;
   unmatchedDocs: ZapSignSignedDoc[];
   unmatchedAuditItems: ZapSignCrossReferenceItem[];
+  googleValidatedAuditItems: ZapSignCrossReferenceItem[];
   closedAuditItems: ZapSignCrossReferenceItem[];
   excludedFolderItems: ZapSignCrossReferenceItem[];
   proceduralAuditItems: ZapSignCrossReferenceItem[];
@@ -1866,26 +2136,104 @@ export interface ZapSignMatchResult {
   diagnosticsByToken: Record<string, ZapSignDocumentDiagnostic>;
 }
 
+function computeUnmatchedDedupeKey(item: ZapSignCrossReferenceItem): string {
+  const cpf = normalizeCPF(item.extractedProfile?.cpf);
+  if (cpf) return `cpf:${cpf}`;
+
+  const phone = normalizePhoneDigits(item.extractedProfile?.phone);
+  if (phone) return `phone:${phone}`;
+
+  const clientSigners = getClientSigners(item.doc);
+  if (clientSigners.length > 0) {
+    const signerTokens = normalizePersonTokens(clientSigners[0].name)
+      .filter((t) => !GENERIC_NON_NAME_WORDS.has(t))
+      .map(phoneticNormalizeToken);
+    if (signerTokens.length > 0) {
+      return `signer:${signerTokens.join(' ')}`;
+    }
+  }
+
+  const titleName =
+    item.extractedProfile?.cleanName ||
+    cleanZapSignDocumentTitle(item.doc.name) ||
+    item.primarySignerName;
+  const titleTokens = normalizePersonTokens(titleName)
+    .filter((t) => !GENERIC_NON_NAME_WORDS.has(t) && !/^\d+$/.test(t))
+    .map(phoneticNormalizeToken);
+  if (titleTokens.length > 0) {
+    return `title:${Array.from(new Set(titleTokens)).sort().join(' ')}`;
+  }
+
+  return `token:${item.doc.token}`;
+}
+
+function deduplicatePendingAuditItems(
+  items: ZapSignCrossReferenceItem[]
+): ZapSignCrossReferenceItem[] {
+  if (items.length <= 1) return items;
+
+  const groups = new Map<string, ZapSignCrossReferenceItem[]>();
+  for (const item of items) {
+    const key = computeUnmatchedDedupeKey(item);
+    const list = groups.get(key) ?? [];
+    list.push(item);
+    groups.set(key, list);
+  }
+
+  const deduplicated: ZapSignCrossReferenceItem[] = [];
+  for (const group of groups.values()) {
+    if (group.length === 1) {
+      deduplicated.push(group[0]);
+      continue;
+    }
+
+    // Prefer richest/newest document (signed PDF + CPF/phone + most recent signedAt)
+    const sorted = [...group].sort((a, b) => {
+      const richness = (x: ZapSignCrossReferenceItem) =>
+        (x.extractedProfile?.cpf ? 4 : 0) +
+        (x.extractedProfile?.phone ? 2 : 0) +
+        (x.doc.signedFileUrl ? 1 : 0);
+      const richDiff = richness(b) - richness(a);
+      if (richDiff !== 0) return richDiff;
+      return String(b.doc.signedAt ?? '').localeCompare(
+        String(a.doc.signedAt ?? '')
+      );
+    });
+
+    const primary = sorted[0];
+    const tokens = sorted.map((entry) => entry.doc.token);
+    deduplicated.push({
+      ...primary,
+      groupedDocsCount: sorted.length,
+      groupedDocTokens: tokens,
+    });
+  }
+
+  return deduplicated;
+}
+
 /**
- * Deterministic multi-source reconciliation engine:
- * Crosses ZapSign signed documents against:
- * 1) Google Sheets (Honorários `clients`) via CPF, phone, or smart name matching
- * 2) Google Drive (`driveEtapas`) via prefix-stripped & fuzzy folder matching
- * 3) Google Calendar (`calendarEvents`) via billing event detection (name, CPF, phone)
+ * Deterministic multi-source reconciliation engine (Google Ecosystem Sovereign):
+ * Trust hierarchy:
+ * 1) Google Sheets (Honorários `clients`, `contratos`, `zapsignConferencia`)
+ * 2) Google Drive (`driveEtapas` inside "Clientes Tráfego Pago")
+ * 3) Google Calendar (`calendarEvents`)
  *
  * Rigidly excludes ignored folders (`ZZ - Encerrados`, `Docs Faltavam`, `Fechados do Escritório`),
- * separates non-contract procedural files (`PROCESSO ...`), and returns a complete
- * `ZapSignDocumentDiagnostic` object for every audited document.
+ * treats clients already present in Sheets OR with an active valid Drive folder as validated in
+ * the Google ecosystem, separates non-contract procedural files (`PROCESSO ...`), and deduplicates
+ * remaining ZapSign pending documents by client identity before returning `unmatchedAuditItems`.
  */
 export function matchZapSignToClients(
   clients: ClientCase[],
   signedDocs: ZapSignSignedDoc[],
   driveEtapas: AppsScriptDriveEtapaRow[] = [],
-  calendarEvents: AppsScriptCalendarEventRow[] = []
+  calendarEvents: AppsScriptCalendarEventRow[] = [],
+  options?: ZapSignMatchOptions
 ): ZapSignMatchResult {
   const matchedByClientId: Record<string, ZapSignSignedDoc[]> = {};
-  const unmatchedDocs: ZapSignSignedDoc[] = [];
-  const unmatchedAuditItems: ZapSignCrossReferenceItem[] = [];
+  const rawUnmatchedAuditItems: ZapSignCrossReferenceItem[] = [];
+  const googleValidatedAuditItems: ZapSignCrossReferenceItem[] = [];
   const closedAuditItems: ZapSignCrossReferenceItem[] = [];
   const excludedFolderItems: ZapSignCrossReferenceItem[] = [];
   const proceduralAuditItems: ZapSignCrossReferenceItem[] = [];
@@ -1903,7 +2251,8 @@ export function matchZapSignToClients(
       doc,
       safeClients,
       safeDrive,
-      safeCalendar
+      safeCalendar,
+      options
     );
 
     allAuditItems.push(item);
@@ -1934,13 +2283,17 @@ export function matchZapSignToClients(
       continue;
     }
 
+    if (item.auditStatus === 'matched_google_ecosystem') {
+      googleValidatedAuditItems.push(item);
+      continue;
+    }
+
     if (item.auditStatus === 'procedural_non_contract') {
       proceduralAuditItems.push(item);
       continue;
     }
 
-    unmatchedDocs.push(doc);
-    unmatchedAuditItems.push(item);
+    rawUnmatchedAuditItems.push(item);
   }
 
   const compareDatesDesc = (a?: string, b?: string) =>
@@ -1952,10 +2305,14 @@ export function matchZapSignToClients(
     );
   }
 
-  unmatchedAuditItems.sort((a, b) =>
+  const unmatchedAuditItems = deduplicatePendingAuditItems(
+    rawUnmatchedAuditItems
+  ).sort((a, b) => compareDatesDesc(a.doc.signedAt, b.doc.signedAt));
+  const unmatchedDocs = unmatchedAuditItems.map((item) => item.doc);
+
+  googleValidatedAuditItems.sort((a, b) =>
     compareDatesDesc(a.doc.signedAt, b.doc.signedAt)
   );
-  unmatchedDocs.sort((a, b) => compareDatesDesc(a.signedAt, b.signedAt));
   proceduralAuditItems.sort((a, b) =>
     compareDatesDesc(a.doc.signedAt, b.doc.signedAt)
   );
@@ -1964,6 +2321,7 @@ export function matchZapSignToClients(
     matchedByClientId,
     unmatchedDocs,
     unmatchedAuditItems,
+    googleValidatedAuditItems,
     closedAuditItems,
     excludedFolderItems,
     proceduralAuditItems,

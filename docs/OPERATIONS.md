@@ -47,3 +47,16 @@ O acesso à interface e às APIs protegidas (`/api/workspace/*`, `/api/zapsign/s
 - **Domínios Firebase Auth:** `barreto-flow-git-ci3amx7gdq-ew.a.run.app`, `barreto-flow-git-137290765564.europe-west1.run.app` e `barreto-flow.ai.studio` adicionados aos Domínios Autorizados.
 - **Validação de Login em Produção:** Login Google em `https://barreto-flow-git-ci3amx7gdq-ew.a.run.app` testado e validado com sucesso utilizando conta autorizada.
 - **Padronização de Nome:** `metadata.json` e `index.html` atualizados para exibir exclusivamente **"Barreto Flow — Barreto Advocacia Especializada"**.
+
+### 2026-11-27 — Paridade Matemática SSOT (100%), Zeragem de Falsos Alertas e Soberania Google sobre ZapSign
+- **Paridade Matemática (aritmética em centavos):**
+  - `SALDO TOTAL A RECEBER = R$ 178.240,61` (`Parcelas datadas: R$ 130.490,61` + `Saldo sem data: R$ 47.750,00`, com `Crédito a vincular: R$ 500,00`).
+  - `TOTAL JÁ RECEBIDO = R$ 20.379,99` | `RECEBIDO NO MÊS = R$ 6.906,67` | `PREVISTO NO MÊS = R$ 10.296,68` | `PARCELAS ATRASADAS = R$ 3.420,01` (20 parcelas) | `FALTA DAS PARCELAS DO MÊS = R$ 4.060,01`.
+  - Corrigida baixa parcial (`PARCIAL` com saldo residual de R$ 0,01) e leitura dedicada da aba `Pagamentos` (incluindo juros e créditos avulsos).
+- **Zeragem de Falsos Erros de Parse (`935 → 0`):**
+  - Campo booleano `dataConfirmada` (`TRUE`/`FALSE` da aba `Cobranças`), células legitimamente vazias, placeholders (`A definir`, `Êxito`, `-`) e linhas de cabeçalho/totalização deixaram de gerar `parseIssues`.
+- **Soberania do Ecossistema Google sobre ZapSign + Deduplicação:**
+  - Enriquecimento de signatários via `GET /api/v1/docs/{token}/` com cache em memória em `server.ts`.
+  - Limpeza de títulos com underscore (`_`), correção de `Hipossuficiência`/`Hipossuficioência`, bloqueio de colisão de 5 letras (`Maria` vs `Márcia`), deduplicação por cliente no ZapSign e validação automática de clientes já presentes na Planilha (`Clientes`, `Contratos`, `ZapSign`) ou com pasta ativa no Drive `"Clientes Tráfego Pago"`.
+- **Apps Script v2.0 (Somente Leitura):**
+  - Código pronto para colar em [docs/apps-script/Code.gs](apps-script/Code.gs) expondo `dashboard`, `clientes`, `parcelas`, `pagamentos`, `contratos`, `zapsignConferencia`, `driveEtapas` e `eventosAgenda`.

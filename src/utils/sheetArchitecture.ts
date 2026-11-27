@@ -77,6 +77,16 @@ export interface StrictDateParseResult {
   error?: string;
 }
 
+export function toCents(value: number): number {
+  if (!Number.isFinite(value)) return 0;
+  return Math.round(value * 100);
+}
+
+export function fromCents(cents: number): number {
+  if (!Number.isFinite(cents)) return 0;
+  return Math.round(cents) / 100;
+}
+
 const SHEET_ERROR_TOKENS = new Set([
   '#ref!',
   '#value!',
@@ -89,6 +99,51 @@ const SHEET_ERROR_TOKENS = new Set([
   'infinity',
   '-infinity',
   'invalid date',
+]);
+
+const LEGITIMATE_EMPTY_CURRENCY_TOKENS = new Set([
+  '-',
+  '—',
+  '–',
+  '--',
+  'n/a',
+  'na',
+  'isento',
+  'exito',
+  'a definir',
+  'definir',
+  'sem valor',
+  'pendente',
+  'nao se aplica',
+]);
+
+const LEGITIMATE_EMPTY_DATE_TOKENS = new Set([
+  '-',
+  '—',
+  '–',
+  '--',
+  'true',
+  'false',
+  'sim',
+  'nao',
+  'verdadeiro',
+  'falso',
+  'sem data',
+  'a definir',
+  'definir',
+  'definir vencimento',
+  'sem vencimento',
+  'aguardando',
+  'aguardando protocolo',
+  'aguardando publicacao',
+  'aguardando sentenca',
+  'aguardando exito',
+  'pendente',
+  'exito',
+  'n/a',
+  'na',
+  'nao confirmado',
+  'nao confirmada',
 ]);
 
 function isValidCalendarDate(year: number, month: number, day: number): Date | null {
@@ -122,8 +177,13 @@ function isValidCalendarDate(year: number, month: number, day: number): Date | n
  * without silently leaking NaN/Infinity. Explicitly flags corrupted cells.
  */
 export function parseBRLAmountStrict(raw: unknown): StrictCurrencyParseResult {
-  if (raw === null || raw === undefined) {
-    return { ok: true, value: 0, raw: '', isEmpty: true };
+  if (raw === null || raw === undefined || typeof raw === 'boolean') {
+    return {
+      ok: true,
+      value: 0,
+      raw: typeof raw === 'boolean' ? String(raw) : '',
+      isEmpty: true,
+    };
   }
 
   if (typeof raw === 'number') {
@@ -138,14 +198,15 @@ export function parseBRLAmountStrict(raw: unknown): StrictCurrencyParseResult {
     }
     return {
       ok: true,
-      value: Math.round(raw * 100) / 100,
+      value: fromCents(toCents(raw)),
       raw: String(raw),
       isEmpty: false,
     };
   }
 
   const rawText = String(raw).trim();
-  if (!rawText || rawText === '-' || rawText === '—' || rawText === '--') {
+  const normalizedToken = normalizeText(rawText);
+  if (!rawText || LEGITIMATE_EMPTY_CURRENCY_TOKENS.has(normalizedToken)) {
     return { ok: true, value: 0, raw: rawText, isEmpty: true };
   }
 
@@ -265,8 +326,12 @@ export function parseBRLAmount(raw: unknown): number {
  * serial dates into both ISO string and validated UTC Date without silent rollovers or Invalid Date.
  */
 export function parseFlexibleDateStrict(raw: unknown): StrictDateParseResult {
-  if (raw === null || raw === undefined) {
-    return { ok: true, raw: '', isEmpty: true };
+  if (raw === null || raw === undefined || typeof raw === 'boolean') {
+    return {
+      ok: true,
+      raw: typeof raw === 'boolean' ? String(raw) : '',
+      isEmpty: true,
+    };
   }
 
   if (raw instanceof Date) {
@@ -308,7 +373,8 @@ export function parseFlexibleDateStrict(raw: unknown): StrictDateParseResult {
   }
 
   const text = String(raw).trim();
-  if (!text || text === '-' || text === '—' || text === '--') {
+  const normalizedToken = normalizeText(text);
+  if (!text || LEGITIMATE_EMPTY_DATE_TOKENS.has(normalizedToken)) {
     return { ok: true, raw: text, isEmpty: true };
   }
 

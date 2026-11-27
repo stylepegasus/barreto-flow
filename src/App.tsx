@@ -8,8 +8,12 @@ import { AlertTriangle, Menu, RefreshCw, RotateCcw, X } from 'lucide-react';
 import {
   ActiveTab,
   AppsScriptCalendarEventRow,
+  AppsScriptContractRow,
+  AppsScriptDashboardSnapshot,
   AppsScriptDriveEtapaRow,
+  AppsScriptPaymentRow,
   AppsScriptSyncResult,
+  AppsScriptZapSignRefRow,
   ChatMessage,
   ClientCase,
   DriveArchitectureSummary,
@@ -236,6 +240,19 @@ export default function App() {
   const [driveEtapas, setDriveEtapas] = useState<AppsScriptDriveEtapaRow[]>(
     () => initialBootstrap.cachedSwr?.data.driveEtapas ?? []
   );
+  const [officialDashboard, setOfficialDashboard] =
+    useState<AppsScriptDashboardSnapshot | null>(
+      () => initialBootstrap.cachedSwr?.data.officialDashboard ?? null
+    );
+  const [paymentsLedger, setPaymentsLedger] = useState<AppsScriptPaymentRow[]>(
+    () => initialBootstrap.cachedSwr?.data.payments ?? []
+  );
+  const [contractsRef, setContractsRef] = useState<AppsScriptContractRow[]>(
+    () => initialBootstrap.cachedSwr?.data.contracts ?? []
+  );
+  const [zapSignRefs, setZapSignRefs] = useState<AppsScriptZapSignRefRow[]>(
+    () => initialBootstrap.cachedSwr?.data.zapSignRefs ?? []
+  );
   const [isAutoSyncing, setIsAutoSyncing] = useState(false);
   const [autoSyncError, setAutoSyncError] = useState<string | null>(null);
   const autoSyncTriggeredRef = useRef(false);
@@ -406,18 +423,22 @@ export default function App() {
     }
   }, [clients, config.sourceMode]);
 
-  const fetchZapSignSigned = useCallback(async () => {
-    if (authStatus !== 'authorized') return;
-    const idToken = await getFirebaseIdToken();
-    if (!idToken) return;
+  const fetchZapSignSigned = useCallback(
+    async (forceRefresh = false) => {
+      if (authStatus !== 'authorized') return;
+      const idToken = await getFirebaseIdToken();
+      if (!idToken) return;
 
-    setZapSignState((prev) => ({ ...prev, loading: true, error: null }));
-    try {
-      const res = await fetch('/api/zapsign/signed', {
-        headers: {
-          Authorization: `Bearer ${idToken}`,
-        },
-      });
+      setZapSignState((prev) => ({ ...prev, loading: true, error: null }));
+      try {
+        const res = await fetch(
+          `/api/zapsign/signed${forceRefresh ? '?force=true' : ''}`,
+          {
+            headers: {
+              Authorization: `Bearer ${idToken}`,
+            },
+          }
+        );
       const payload = (await res.json().catch(() => ({}))) as {
         configured?: boolean;
         docs?: ZapSignSignedDoc[];
@@ -597,6 +618,10 @@ export default function App() {
       );
 
       setClients(enrichedClients);
+      setOfficialDashboard(null);
+      setPaymentsLedger([]);
+      setContractsRef([]);
+      setZapSignRefs([]);
       setParseIssues(wsHealthReport.parseIssues);
       setHealthReport(wsHealthReport);
       setConfig((prev) => ({
@@ -774,6 +799,10 @@ export default function App() {
     setAutoSyncError(null);
     setDriveEtapas([]);
     setCalendarEvents([]);
+    setOfficialDashboard(null);
+    setPaymentsLedger([]);
+    setContractsRef([]);
+    setZapSignRefs([]);
     setAppsScriptSummary(null);
     setParseIssues([]);
     setHealthReport(null);
@@ -809,6 +838,10 @@ export default function App() {
       setClients(result.clients);
       setCalendarEvents(result.calendarEvents);
       setDriveEtapas(result.driveEtapas);
+      setOfficialDashboard(result.officialDashboard ?? null);
+      setPaymentsLedger(result.payments ?? []);
+      setContractsRef(result.contracts ?? []);
+      setZapSignRefs(result.zapSignRefs ?? []);
       setAppsScriptSummary(result.summary);
       setParseIssues(result.parseIssues ?? []);
       setHealthReport(result.healthReport ?? null);
@@ -1040,6 +1073,10 @@ export default function App() {
     setClients(fresh);
     setCalendarEvents([]);
     setDriveEtapas([]);
+    setOfficialDashboard(null);
+    setPaymentsLedger([]);
+    setContractsRef([]);
+    setZapSignRefs([]);
     setAppsScriptSummary(null);
     setParseIssues([]);
     setHealthReport(null);
@@ -1273,7 +1310,11 @@ export default function App() {
       clients,
       zapSignState.docs,
       driveEtapas,
-      calendarEvents
+      calendarEvents,
+      {
+        contracts: contractsRef,
+        zapSignRefs,
+      }
     );
 
     const hasManualLinks = Object.keys(manualZapSignLinks).length > 0;
@@ -1311,7 +1352,15 @@ export default function App() {
       unmatchedAuditItems: remainingAuditItems,
       unmatchedDocs: remainingDocs,
     };
-  }, [clients, zapSignState.docs, driveEtapas, calendarEvents, manualZapSignLinks]);
+  }, [
+    clients,
+    zapSignState.docs,
+    driveEtapas,
+    calendarEvents,
+    contractsRef,
+    zapSignRefs,
+    manualZapSignLinks,
+  ]);
 
   const handleCreateClientFromZapSign = async (
     draft: ZapSignPrefilledClientDraft
@@ -1536,6 +1585,8 @@ export default function App() {
       zapSignDocs: zapSignState.docs,
       unmatchedZapSignDocs: zapSignMatchResult.unmatchedDocs,
       unmatchedZapSignItems: zapSignMatchResult.unmatchedAuditItems,
+      officialDashboard,
+      payments: paymentsLedger,
     }),
     [
       activeTab,
@@ -1551,6 +1602,8 @@ export default function App() {
       zapSignState.docs,
       zapSignMatchResult.unmatchedDocs,
       zapSignMatchResult.unmatchedAuditItems,
+      officialDashboard,
+      paymentsLedger,
     ]
   );
 
@@ -1813,6 +1866,8 @@ export default function App() {
             <DashboardView
               clients={clients}
               todayISO={todayISO}
+              officialDashboard={officialDashboard}
+              payments={paymentsLedger}
               unmatchedZapSignDocs={zapSignMatchResult.unmatchedDocs}
               unmatchedZapSignItems={zapSignMatchResult.unmatchedAuditItems}
               proceduralZapSignCount={
@@ -1873,7 +1928,7 @@ export default function App() {
               }
               healthReport={healthReport}
               parseIssues={parseIssues}
-              onRefreshZapSign={fetchZapSignSigned}
+              onRefreshZapSign={() => void fetchZapSignSigned(true)}
               onPrefillZapSignItem={setZapSignPrefillItem}
               onQuitarParcela={requestMarkPaid}
               onAlterarData={setRescheduleItem}

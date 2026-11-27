@@ -34,7 +34,7 @@ export const DEFAULT_APPS_SCRIPT_URL =
 const APPS_SCRIPT_SYNC_TIMEOUT_MS = 75_000;
 const SWR_DEFAULT_FRESH_TTL_MS = 60_000; // 60s fresh
 const SWR_DEFAULT_MAX_STALE_MS = 30 * 60_000; // 30m stale-while-revalidate window
-const SWR_STORAGE_PREFIX = 'barreto_swr_sync_v1:';
+const SWR_STORAGE_PREFIX = 'barreto_swr_sync_v2:';
 const SHEETS_BATCH_TAB_CHUNK_SIZE = 10;
 
 export interface WorkspaceDiscoveryResult {
@@ -1326,13 +1326,15 @@ async function fetchAppsScriptNetwork(
       );
     }
 
-    // Official Apps Script contract: { clientes, parcelas, driveEtapas, eventosAgenda }
+    // Official Apps Script contract: { dashboard?, clientes, parcelas, pagamentos?, contratos?, zapsignConferencia?, driveEtapas, eventosAgenda }
     if (
       json &&
       typeof json === 'object' &&
       !Array.isArray(json) &&
       ('clientes' in json ||
         'parcelas' in json ||
+        'pagamentos' in json ||
+        'dashboard' in json ||
         'driveEtapas' in json ||
         'eventosAgenda' in json)
     ) {

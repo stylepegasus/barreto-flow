@@ -20,6 +20,8 @@ import {
   Wallet,
 } from 'lucide-react';
 import {
+  AppsScriptDashboardSnapshot,
+  AppsScriptPaymentRow,
   ClientCase,
   InstallmentWithStatus,
   ZapSignCrossReferenceItem,
@@ -46,6 +48,8 @@ import {
 interface DashboardViewProps {
   clients: ClientCase[];
   todayISO: string;
+  officialDashboard?: AppsScriptDashboardSnapshot | null;
+  payments?: AppsScriptPaymentRow[];
   unmatchedZapSignDocs?: ZapSignSignedDoc[];
   unmatchedZapSignItems?: ZapSignCrossReferenceItem[];
   proceduralZapSignCount?: number;
@@ -122,6 +126,8 @@ const KpiInfoTooltip: React.FC<KpiInfoTooltipProps> = ({
 export const DashboardView: React.FC<DashboardViewProps> = ({
   clients,
   todayISO,
+  officialDashboard,
+  payments = [],
   unmatchedZapSignDocs = [],
   unmatchedZapSignItems,
   proceduralZapSignCount = 0,
@@ -171,8 +177,8 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
   const openTooltipId = pinnedTooltipId ?? hoveredTooltipId;
 
   const monthOptions = useMemo(
-    () => getAvailableMonthOptions(clients, todayISO),
-    [clients, todayISO]
+    () => getAvailableMonthOptions(clients, todayISO, payments),
+    [clients, todayISO, payments]
   );
 
   useEffect(() => {
@@ -196,8 +202,16 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
   }, [pinnedTooltipId, hoveredTooltipId]);
 
   const [refYear, refMonth] = selectedMonthKey.split('-').map(Number);
-  const kpis = calculateDashboardKPIs(clients, todayISO, selectedMonthKey);
-  const chartData = calculateMonthlyChartData(clients, refYear, refMonth);
+  const kpis = calculateDashboardKPIs(clients, todayISO, selectedMonthKey, {
+    officialDashboard,
+    payments,
+  });
+  const chartData = calculateMonthlyChartData(
+    clients,
+    refYear,
+    refMonth,
+    payments
+  );
   const attentionList = getAttentionTodayList(clients, todayISO);
 
   const selectedMonthLabel =
@@ -311,8 +325,10 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                     ? 'contrato assinado no ZapSign'
                     : 'contratos assinados no ZapSign'}
                 </strong>{' '}
-                ainda não constam na planilha de honorários (excluindo pastas ZZ -
-                Encerrados, Docs Faltavam e Fechados do Escritório
+                ainda não constam na planilha oficial nem no Google Drive
+                &ldquo;Clientes Tráfego Pago&rdquo; (deduplicado por cliente;
+                excluindo pastas ZZ - Encerrados, Docs Faltavam e Fechados do
+                Escritório
                 {proceduralZapSignCount > 0
                   ? `; ${proceduralZapSignCount} doc(s) processuais separados`
                   : ''}
@@ -580,7 +596,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                 <KpiInfoTooltip
                   id="kpi-total-receber"
                   title="Total a Receber"
-                  description="Soma de todas as parcelas em aberto da carteira inteira (vencidas e a vencer) que ainda não foram pagas."
+                  description="Saldo total a receber da planilha oficial: soma das parcelas datadas confirmadas em aberto mais o saldo sem data definida (já descontado eventual crédito a vincular)."
                   isOpen={openTooltipId === 'kpi-total-receber'}
                   onToggle={handleToggleTooltip}
                   onOpen={setHoveredTooltipId}
@@ -592,8 +608,10 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
             <p className="mt-3 text-2xl font-bold tracking-tight text-[#313131] tabular-nums">
               {formatCurrencyBRL(kpis.totalAReceber)}
             </p>
-            <p className="mt-1.5 text-xs text-[#313131]/60">
-              Soma de todas as parcelas em aberto
+            <p className="mt-1.5 text-xs text-[#313131]/60 tabular-nums">
+              {(kpis.saldoSemData ?? 0) > 0 || (kpis.creditoAVincular ?? 0) > 0
+                ? `Datadas: ${formatCurrencyBRL(kpis.saldoParcelasDatadas ?? kpis.totalAReceber)} · Sem data: ${formatCurrencyBRL(kpis.saldoSemData ?? 0)}${(kpis.creditoAVincular ?? 0) > 0 ? ` · Crédito: ${formatCurrencyBRL(kpis.creditoAVincular ?? 0)}` : ''}`
+                : 'Soma de todas as parcelas em aberto'}
             </p>
           </div>
 
@@ -605,7 +623,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                 <KpiInfoTooltip
                   id="kpi-recebido-mes"
                   title="Recebido no Mês"
-                  description="Total de honorários efetivamente pagos e confirmados dentro do mês e ano selecionados no filtro acima."
+                  description="Total de honorários efetivamente recebidos na competência selecionada (incluindo baixas parciais, juros e créditos registrados na aba Pagamentos)."
                   isOpen={openTooltipId === 'kpi-recebido-mes'}
                   onToggle={handleToggleTooltip}
                   onOpen={setHoveredTooltipId}
@@ -618,10 +636,13 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
               {formatCurrencyBRL(kpis.recebidoNoMes)}
             </p>
             <p className="mt-1.5 text-xs text-emerald-800 tabular-nums">
-              {isCurrentMonth
-                ? 'Entradas confirmadas no mês atual'
-                : `Entradas em ${selectedMonthLabel}`}{' '}
-              · Previsto {formatCurrencyCompactBRL(kpis.previstoNoMes)}
+              Previsto {formatCurrencyBRL(kpis.previstoNoMes)}
+              {(kpis.faltaNoMes ?? 0) > 0
+                ? ` · Falta ${formatCurrencyBRL(kpis.faltaNoMes ?? 0)}`
+                : ''}
+              {(kpis.totalJaRecebido ?? 0) > 0
+                ? ` · Acumulado ${formatCurrencyBRL(kpis.totalJaRecebido ?? 0)}`
+                : ''}
             </p>
           </div>
 
