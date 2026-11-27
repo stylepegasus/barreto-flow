@@ -60,3 +60,12 @@ O acesso à interface e às APIs protegidas (`/api/workspace/*`, `/api/zapsign/s
   - Limpeza de títulos com underscore (`_`), correção de `Hipossuficiência`/`Hipossuficioência`, bloqueio de colisão de 5 letras (`Maria` vs `Márcia`), deduplicação por cliente no ZapSign e validação automática de clientes já presentes na Planilha (`Clientes`, `Contratos`, `ZapSign`) ou com pasta ativa no Drive `"Clientes Tráfego Pago"`.
 - **Apps Script v2.0 (Somente Leitura):**
   - Código pronto para colar em [docs/apps-script/Code.gs](apps-script/Code.gs) expondo `dashboard`, `clientes`, `parcelas`, `pagamentos`, `contratos`, `zapsignConferencia`, `driveEtapas` e `eventosAgenda`.
+
+### 2026-11-27 — Blindagem da Assistente Dona (Gemini + Firebase) e Novo Avatar Editorial
+- **Motor Gemini & Contexto (`server.ts`, `src/utils/assistantContext.ts`):**
+  - Prompt centralizado da Dona em fonte única de verdade com suporte à composição oficial de saldos (datadas, sem data, crédito a vincular), alertas de integridade (`parseIssues`/Drive/Calendar) e soberania Google sobre ZapSign.
+  - Limites rígidos por requisição (`16` turnos, `4.000` chars/turno, `8.000` chars/mensagem, `48.000` chars de contexto, `12 MB` em anexos com allowlist de MIME types), redação automática de tokens/JWTs/chaves, timeouts explícitos (`25s`), fallback automático (`gemini-4-hydrogen` → `gemini-3.1-flash-lite`) e retry em falhas transitórias.
+- **Segurança Firebase na Leitura de Documentos do Drive:**
+  - Nova rota autenticada `GET /api/workspace/drive-file` protegida por `requireAuthorizedUser` (ID Token Firebase + allowlist) + validação estrita de `fileId` e URL permitida do Apps Script.
+- **Avatar Editorial da Dona:**
+  - Novo componente `src/components/DonaAvatar.tsx` + asset otimizado `public/assets/dona-avatar-v1.jpg` (320×320, ~20 KB, mulher ruiva executiva em estética editorial alinhada à paleta `#313131` / `#F6F3EC` / `#DCB14A`) com fallback SVG ilustrado confiável no FAB, cabeçalho, boas-vindas, bolhas de resposta e botão *Analisar com a Dona*.

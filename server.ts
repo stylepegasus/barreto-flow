@@ -6,7 +6,18 @@ import { fileURLToPath } from 'url';
 import { GoogleGenAI } from '@google/genai';
 import type { Content, Part } from '@google/genai';
 import { verifyFirebaseIdTokenAndAllowlist } from './src/utils/serverAuth.ts';
-import { buildDonaSystemPrompt } from './src/utils/assistantContext.ts';
+import {
+  MAX_DOCUMENT_BASE64_CHARS,
+  MAX_DOCUMENT_TEXT_CHARS,
+  MAX_PORTFOLIO_CONTEXT_CHARS,
+  MAX_USER_MESSAGE_CHARS,
+  buildDonaSystemPrompt,
+  redactSensitiveTokens,
+  sanitizeAssistantDocumentAttachment,
+  sanitizeAssistantHistory,
+  type AssistantDocumentAttachment,
+  type AssistantHistoryTurn,
+} from './src/utils/assistantContext.ts';
 import type { ZapSignSignedDoc } from './src/types/honorarios.ts';
 import {
   isExcludedZapSignFolder,
@@ -33,6 +44,9 @@ const WORKSPACE_CACHE_FRESH_TTL_MS = 15_000;
 const WORKSPACE_CACHE_STALE_TTL_MS = 30 * 60_000;
 const WORKSPACE_CACHE_MAX_ENTRIES = 10;
 const WORKSPACE_FETCH_TIMEOUT_MS = 65_000;
+const DRIVE_FILE_FETCH_TIMEOUT_MS = 35_000;
+const GEMINI_PRIMARY_TIMEOUT_MS = 25_000;
+const GEMINI_FALLBACK_TIMEOUT_MS = 25_000;
 const ZAPSIGN_FETCH_TIMEOUT_MS = 20_000;
 const ZAPSIGN_LIST_CACHE_TTL_MS = 60_000;
 const ZAPSIGN_SIGNERS_CACHE_MAX_ENTRIES = 600;
@@ -407,11 +421,31 @@ async function requireAuthorizedUser(
 }
 
 function isTransientUnavailableError(err: unknown): boolean {
-  const msg = err instanceof Error ? err.message : String(err ?? '');
+  const msg = (err instanceof Error ? err.message : String(err ?? '')).toLowerCase();
   return (
     msg.includes('503') ||
-    msg.includes('UNAVAILABLE') ||
-    msg.toLowerCase().includes('high demand')
+    msg.includes('502') ||
+    msg.includes('504') ||
+    msg.includes('500') ||
+    msg.includes('unavailable') ||
+    msg.includes('deadline_exceeded') ||
+    msg.includes('high demand') ||
+    msg.includes('overloaded') ||
+    msg.includes('econnreset') ||
+    msg.includes('etimedout') ||
+    msg.includes('fetch failed') ||
+    msg.includes('503_timeout')
+  );
+}
+
+function shouldFallbackGeminiModel(err: unknown): boolean {
+  if (isTransientUnavailableError(err)) return true;
+  const msg = (err instanceof Error ? err.message : String(err ?? '')).toLowerCase();
+  return (
+    msg.includes('429') ||
+    msg.includes('resource_exhausted') ||
+    msg.includes('404') ||
+    msg.includes('not_found')
   );
 }
 
@@ -419,27 +453,15 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-interface ChatHistoryEntry {
-  role: 'user' | 'model';
-  text: string;
-}
-
-interface DocumentAttachmentPayload {
-  nome: string;
-  mimeType: string;
-  formato: 'base64' | 'texto';
-  conteudo: string;
-}
-
 interface AssistantChatRequestBody {
   message?: string;
-  history?: ChatHistoryEntry[];
+  history?: unknown[];
   portfolioContext?: string;
-  documentAttachment?: DocumentAttachmentPayload;
+  documentAttachment?: unknown;
 }
 
 function getGeminiClient(): GoogleGenAI {
-  const apiKey = process.env.GEMINI_API_KEY;
+  const apiKey = process.env.GEMINI_API_KEY?.trim();
   if (!apiKey) {
     throw new Error(
       'Chave GEMINI_API_KEY não encontrada nas configurações do ambiente.'
@@ -456,19 +478,16 @@ function getGeminiClient(): GoogleGenAI {
 }
 
 function buildContents(
-  history: ChatHistoryEntry[],
+  history: AssistantHistoryTurn[],
   currentMessage: string,
-  documentAttachment?: DocumentAttachmentPayload
+  documentAttachment?: AssistantDocumentAttachment
 ): Content[] {
   const contents: Content[] = [];
 
-  for (const item of history.slice(-16)) {
-    const cleanText = String(item?.text ?? '').trim();
-    if (!cleanText) continue;
-    const role = item.role === 'model' ? 'model' : 'user';
+  for (const item of history) {
     contents.push({
-      role,
-      parts: [{ text: cleanText }],
+      role: item.role,
+      parts: [{ text: item.text }],
     });
   }
 
@@ -486,7 +505,10 @@ function buildContents(
         text: `${currentMessage}\n\n[Documento anexado do Google Drive: ${documentAttachment.nome} (${documentAttachment.mimeType || 'application/pdf'})]`,
       });
     } else {
-      const clippedText = documentAttachment.conteudo.slice(0, 120000);
+      const clippedText = documentAttachment.conteudo.slice(
+        0,
+        MAX_DOCUMENT_TEXT_CHARS
+      );
       userParts.push({
         text: `${currentMessage}\n\n--- CONTEÚDO DO DOCUMENTO (${documentAttachment.nome}) ---\n${clippedText}`,
       });
@@ -529,21 +551,39 @@ async function generateWithFallback(
         contents,
         config: { systemInstruction },
       }),
-      15000
+      GEMINI_PRIMARY_TIMEOUT_MS
     );
   } catch (err) {
-    const isTimeout = err instanceof Error && err.message === '503_TIMEOUT';
-    if (!isTimeout && !isTransientUnavailableError(err)) {
+    if (!shouldFallbackGeminiModel(err)) {
       throw err;
     }
+    const isTimeout = err instanceof Error && err.message === '503_TIMEOUT';
     if (!isTimeout) {
-      await sleep(400);
+      await sleep(500);
     }
-    return await ai.models.generateContent({
-      model: FALLBACK_MODEL,
-      contents,
-      config: { systemInstruction },
-    });
+    try {
+      return await withTimeout(
+        ai.models.generateContent({
+          model: FALLBACK_MODEL,
+          contents,
+          config: { systemInstruction },
+        }),
+        GEMINI_FALLBACK_TIMEOUT_MS
+      );
+    } catch (fallbackErr) {
+      if (!isTransientUnavailableError(fallbackErr)) {
+        throw fallbackErr;
+      }
+      await sleep(700);
+      return await withTimeout(
+        ai.models.generateContent({
+          model: FALLBACK_MODEL,
+          contents,
+          config: { systemInstruction },
+        }),
+        GEMINI_FALLBACK_TIMEOUT_MS
+      );
+    }
   }
 }
 
@@ -569,18 +609,41 @@ async function startServer() {
   });
 
   app.post('/api/assistant/chat', requireAuthorizedUser, async (req, res) => {
+    res.setHeader('Cache-Control', 'no-store');
     try {
       const body = (req.body ?? {}) as AssistantChatRequestBody;
-      const message = String(body.message ?? '').trim();
-      if (!message) {
-        res.status(400).json({ error: 'Envie uma pergunta ou comando para o assistente.' });
+      const rawMessage = redactSensitiveTokens(body.message ?? '').trim();
+      if (!rawMessage) {
+        res
+          .status(400)
+          .json({ error: 'Envie uma pergunta ou comando para a Dona.' });
+        return;
+      }
+      if (rawMessage.length > MAX_USER_MESSAGE_CHARS) {
+        res.status(400).json({
+          error: `A mensagem excede o limite de ${MAX_USER_MESSAGE_CHARS} caracteres. Envie uma solicitação mais concisa.`,
+        });
+        return;
+      }
+
+      const attachmentCheck = sanitizeAssistantDocumentAttachment(
+        body.documentAttachment
+      );
+      if (!attachmentCheck.ok) {
+        res.status(attachmentCheck.status).json({ error: attachmentCheck.error });
         return;
       }
 
       const ai = getGeminiClient();
-      const history = Array.isArray(body.history) ? body.history : [];
-      const portfolioContext = String(body.portfolioContext ?? '').slice(0, 100000);
-      const contents = buildContents(history, message, body.documentAttachment);
+      const history = sanitizeAssistantHistory(body.history);
+      const portfolioContext = redactSensitiveTokens(
+        body.portfolioContext ?? ''
+      ).slice(0, MAX_PORTFOLIO_CONTEXT_CHARS);
+      const contents = buildContents(
+        history,
+        rawMessage,
+        attachmentCheck.attachment
+      );
 
       const response = await generateWithFallback(
         ai,
@@ -591,7 +654,8 @@ async function startServer() {
       const reply = response.text?.trim();
       if (!reply) {
         res.status(502).json({
-          error: 'O assistente não retornou texto para esta solicitação. Tente novamente.',
+          error:
+            'A Dona não retornou resposta para esta solicitação. Tente novamente em instantes.',
         });
         return;
       }
@@ -599,29 +663,39 @@ async function startServer() {
       res.json({ reply });
     } catch (err: unknown) {
       const errMsg =
-        err instanceof Error ? err.message : 'Erro inesperado ao consultar o Gemini.';
+        err instanceof Error
+          ? err.message
+          : 'Erro inesperado ao consultar o serviço de IA.';
       const isMissingKey = errMsg.includes('GEMINI_API_KEY');
+      const isTimeout = errMsg === '503_TIMEOUT';
       const status = isMissingKey
         ? 503
-        : errMsg.includes('429') || errMsg.includes('RESOURCE_EXHAUSTED')
-          ? 429
-          : isTransientUnavailableError(err)
-            ? 503
-            : errMsg.includes('403') || errMsg.includes('PERMISSION_DENIED')
-              ? 403
-              : 500;
+        : isTimeout
+          ? 504
+          : errMsg.includes('429') || errMsg.includes('RESOURCE_EXHAUSTED')
+            ? 429
+            : isTransientUnavailableError(err)
+              ? 503
+              : errMsg.includes('403') || errMsg.includes('PERMISSION_DENIED')
+                ? 403
+                : 500;
 
-      console.error('[Dona · Barreto Flow] Erro Gemini API:', errMsg);
+      console.error(
+        `[Dona · Barreto Flow] Erro Gemini API (HTTP ${status}):`,
+        redactSensitiveTokens(errMsg).slice(0, 300)
+      );
       res.status(status).json({
         error: isMissingKey
-          ? 'A Dona está indisponível porque a chave de IA (GEMINI_API_KEY) ainda não foi configurada no ambiente do servidor.'
-          : status === 429
-            ? 'Limite temporário de requisições da API Gemini atingido. Aguarde alguns segundos e tente novamente.'
-            : status === 503
-              ? 'O serviço de IA está temporariamente sobrecarregado. Aguarde alguns segundos e tente novamente.'
-              : status === 403
-                ? 'Permissão negada ou chave da API Gemini inválida nas configurações do ambiente.'
-                : 'A Dona não conseguiu concluir a análise neste momento. Tente novamente em instantes.',
+          ? 'A Dona está indisponível porque o serviço de IA ainda não foi configurado no servidor.'
+          : status === 504
+            ? 'A análise excedeu o tempo limite de resposta da IA. Tente novamente em instantes ou com um arquivo menor.'
+            : status === 429
+              ? 'Limite temporário de requisições da IA atingido. Aguarde alguns segundos e tente novamente.'
+              : status === 503
+                ? 'O serviço de IA está temporariamente sobrecarregado. Aguarde alguns segundos e tente novamente.'
+                : status === 403
+                  ? 'Permissão negada ao consultar o serviço de IA. Contate o administrador do Barreto Flow.'
+                  : 'A Dona não conseguiu concluir a análise neste momento. Tente novamente em instantes.',
       });
     }
   });
@@ -812,6 +886,126 @@ async function startServer() {
       });
     }
   });
+
+  app.get(
+    '/api/workspace/drive-file',
+    requireAuthorizedUser,
+    async (req, res) => {
+      res.setHeader('Cache-Control', 'no-store');
+      const fileId =
+        typeof req.query.fileId === 'string' ? req.query.fileId.trim() : '';
+      if (!fileId || !/^[a-zA-Z0-9_-]{8,128}$/.test(fileId)) {
+        res
+          .status(400)
+          .json({ error: 'Identificador de arquivo do Google Drive inválido.' });
+        return;
+      }
+
+      const rawUrl =
+        typeof req.query.url === 'string' ? req.query.url : undefined;
+      const validated = resolveAllowedAppsScriptUrl(rawUrl);
+      if (!validated.ok) {
+        res.status(400).json({ error: validated.error });
+        return;
+      }
+
+      const controller = new AbortController();
+      const timer = setTimeout(
+        () => controller.abort(),
+        DRIVE_FILE_FETCH_TIMEOUT_MS
+      );
+
+      try {
+        const endpoint = new URL(validated.url);
+        endpoint.searchParams.set('acao', 'lerArquivo');
+        endpoint.searchParams.set('fileId', fileId);
+
+        const upstream = await fetch(endpoint.toString(), {
+          method: 'GET',
+          redirect: 'follow',
+          signal: controller.signal,
+        });
+
+        if (!upstream.ok) {
+          res.status(502).json({
+            error: `Não foi possível ler o arquivo no Google Drive (HTTP ${upstream.status}).`,
+          });
+          return;
+        }
+
+        const data = (await upstream.json().catch(() => null)) as Record<
+          string,
+          unknown
+        > | null;
+        if (!data || typeof data !== 'object') {
+          res.status(502).json({
+            error:
+              'Resposta inválida ao ler o documento no Google Drive via Apps Script.',
+          });
+          return;
+        }
+
+        if (data.error || data.erro) {
+          res.status(422).json({
+            error: redactSensitiveTokens(data.error ?? data.erro).slice(0, 220),
+          });
+          return;
+        }
+
+        const formatoRaw = String(data.formato ?? '').toLowerCase().trim();
+        const formato: 'base64' | 'texto' =
+          formatoRaw === 'base64' ? 'base64' : 'texto';
+        const conteudo = String(data.conteudo ?? '');
+
+        if (!conteudo) {
+          res.status(422).json({
+            error:
+              'O documento selecionado não possui conteúdo legível para análise.',
+          });
+          return;
+        }
+
+        if (
+          formato === 'base64' &&
+          conteudo.length > MAX_DOCUMENT_BASE64_CHARS
+        ) {
+          res.status(413).json({
+            error:
+              'O arquivo selecionado excede o limite de 12 MB suportado para análise.',
+          });
+          return;
+        }
+
+        res.json({
+          nome: String(data.nome ?? 'Documento').slice(0, 180),
+          mimeType: String(
+            data.mimeType ??
+              (formato === 'base64' ? 'application/pdf' : 'text/plain')
+          ),
+          formato,
+          conteudo:
+            formato === 'texto'
+              ? conteudo.slice(0, MAX_DOCUMENT_TEXT_CHARS)
+              : conteudo,
+        });
+      } catch (err: unknown) {
+        const isTimeout = err instanceof Error && err.name === 'AbortError';
+        console.error(
+          '[Workspace Drive File] Erro ao ler arquivo para Dona:',
+          redactSensitiveTokens(
+            err instanceof Error ? err.message : String(err ?? '')
+          ).slice(0, 240)
+        );
+        res.status(isTimeout ? 504 : 502).json({
+          error: isTimeout
+            ? 'Tempo limite excedido ao baixar o documento do Google Drive. Tente novamente.'
+            : 'Falha ao consultar o documento no Google Drive. Tente novamente em instantes.',
+        });
+      } finally {
+        clearTimeout(timer);
+      }
+    }
+  );
 
   app.post(
     '/api/workspace/cache/invalidate',

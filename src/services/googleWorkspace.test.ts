@@ -6,6 +6,7 @@ import {
   executeAtomicClientRegistration,
   executeAtomicInstallmentPayment,
   executeAtomicRetryAction,
+  fetchDriveFileContentAuthenticated,
   invalidateAppsScriptSyncCache,
   invalidateServerWorkspaceCache,
   syncFromAppsScriptUrl,
@@ -470,6 +471,57 @@ test('invalidateServerWorkspaceCache clears local cache and calls POST /api/work
     assert.equal(capturedMethod, 'POST');
     assert.equal(capturedAuth, 'Bearer firebase-id-token-123');
     assert.equal(JSON.parse(capturedBody).url, EXPECTED_OFFICIAL_URL);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('fetchDriveFileContentAuthenticated calls /api/workspace/drive-file with Firebase Bearer token and rejects unauthorized responses', async () => {
+  const originalFetch = globalThis.fetch;
+  let capturedUrl = '';
+  let capturedAuth = '';
+
+  try {
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      capturedUrl = String(input);
+      const headers = (init?.headers ?? {}) as Record<string, string>;
+      capturedAuth = headers.Authorization ?? '';
+      return new Response(
+        JSON.stringify({
+          nome: 'Contrato Honorários.pdf',
+          mimeType: 'application/pdf',
+          formato: 'base64',
+          conteudo: 'JVBERi0xLjQK',
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } }
+      );
+    }) as typeof fetch;
+
+    const file = await fetchDriveFileContentAuthenticated(
+      'firebase-id-token-xyz',
+      '1YBosHy12iVTHVPnGUgdF8dB69y75OGsx',
+      EXPECTED_OFFICIAL_URL
+    );
+    assert.match(capturedUrl, /^\/api\/workspace\/drive-file\?/);
+    assert.match(capturedUrl, /fileId=1YBosHy12iVTHVPnGUgdF8dB69y75OGsx/);
+    assert.equal(capturedAuth, 'Bearer firebase-id-token-xyz');
+    assert.equal(file.nome, 'Contrato Honorários.pdf');
+    assert.equal(file.formato, 'base64');
+
+    // Unauthorized rejection must return safe Portuguese message
+    globalThis.fetch = (async () =>
+      new Response(JSON.stringify({ error: 'Sessão inválida ou expirada.' }), {
+        status: 401,
+      })) as typeof fetch;
+
+    await assert.rejects(
+      () =>
+        fetchDriveFileContentAuthenticated(
+          'expired-token',
+          '1YBosHy12iVTHVPnGUgdF8dB69y75OGsx'
+        ),
+      /Sessão inválida/i
+    );
   } finally {
     globalThis.fetch = originalFetch;
   }

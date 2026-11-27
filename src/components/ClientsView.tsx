@@ -13,9 +13,9 @@ import {
   RefreshCw,
   Search,
   ShieldAlert,
-  Sparkles,
   UserPlus,
 } from 'lucide-react';
+import { DonaAvatar } from './DonaAvatar';
 import {
   ClientCase,
   DRIVE_STAGES,
@@ -844,7 +844,7 @@ export const ClientsView: React.FC<ClientsViewProps> = ({
                                   aria-label={`Analisar ${file.nome} com a Dona`}
                                   className="inline-flex items-center gap-1.5 rounded-md bg-[#313131] px-2.5 py-1.5 text-[11px] font-medium text-white hover:bg-[#313131]/90 whitespace-nowrap"
                                 >
-                                  <Sparkles className="h-3 w-3 text-[#DCB14A]" />
+                                  <DonaAvatar size="xs" decorative />
                                   Analisar com a Dona
                                 </button>
                               </div>

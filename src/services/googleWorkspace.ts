@@ -1502,6 +1502,73 @@ export async function syncWorkspaceFromServer(
 }
 
 /**
+ * Leitura autenticada sob demanda de arquivo no Google Drive via servidor
+ * (`GET /api/workspace/drive-file`, protegido por Firebase ID Token + allowlist).
+ */
+export async function fetchDriveFileContentAuthenticated(
+  firebaseIdToken: string,
+  fileId: string,
+  appsScriptUrl?: string
+): Promise<DriveFileContentResponse> {
+  const cleanToken = firebaseIdToken.trim();
+  if (!cleanToken) {
+    throw new Error(
+      'Sua sessão expirou. Faça login novamente com uma conta Google autorizada.'
+    );
+  }
+  const cleanFileId = fileId.trim();
+  if (!cleanFileId) {
+    throw new Error('Identificador do arquivo no Drive não informado.');
+  }
+
+  const params = new URLSearchParams({ fileId: cleanFileId });
+  if (appsScriptUrl?.trim()) {
+    params.set('url', appsScriptUrl.trim());
+  }
+
+  const res = await fetch(`/api/workspace/drive-file?${params.toString()}`, {
+    method: 'GET',
+    headers: {
+      Authorization: `Bearer ${cleanToken}`,
+      Accept: 'application/json',
+    },
+  });
+
+  const data = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+  if (!res.ok) {
+    const serverError =
+      typeof data.error === 'string' && data.error.trim() ? data.error.trim() : '';
+    throw new Error(
+      serverError ||
+        (res.status === 401 || res.status === 403
+          ? 'Acesso não autorizado para ler documentos do Google Drive. Faça login novamente.'
+          : `Não foi possível ler o arquivo no Drive (HTTP ${res.status}).`)
+    );
+  }
+
+  const formatoRaw = String(data.formato ?? '').toLowerCase().trim();
+  const formato: 'base64' | 'texto' =
+    formatoRaw === 'base64' ? 'base64' : 'texto';
+  const conteudo = String(data.conteudo ?? '');
+
+  if (!conteudo) {
+    throw new Error(
+      'O arquivo selecionado não possui conteúdo legível para análise.'
+    );
+  }
+
+  return {
+    nome: String(data.nome ?? 'Documento'),
+    mimeType: String(
+      data.mimeType ??
+        (formato === 'base64' ? 'application/pdf' : 'text/plain')
+    ),
+    formato,
+    conteudo,
+  };
+}
+
+/**
  * Leitura sob demanda de arquivo no Google Drive (SOMENTE LEITURA via GET).
  * Consulta `${appsScriptUrl}?acao=lerArquivo&fileId=${fileId}`.
  */

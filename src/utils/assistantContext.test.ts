@@ -4,11 +4,17 @@ import {
   ASSISTANT_FIRM_NAME,
   ASSISTANT_NAME,
   ASSISTANT_ROLE_LABEL,
+  MAX_DOCUMENT_BASE64_CHARS,
+  MAX_HISTORY_MESSAGE_CHARS,
+  MAX_HISTORY_TURNS,
   MAX_PORTFOLIO_CONTEXT_CHARS,
   buildDocumentAnalysisPrompt,
   buildDonaSystemPrompt,
   buildPortfolioContextSummary,
   findDocumentReferenceInQuery,
+  redactSensitiveTokens,
+  sanitizeAssistantDocumentAttachment,
+  sanitizeAssistantHistory,
   sanitizeContextText,
 } from './assistantContext';
 import { ClientCase } from '../types/honorarios';
@@ -270,4 +276,162 @@ test('buildDocumentAnalysisPrompt addresses Dona and asks for process number, ob
   assert.match(prompt, /Número do processo/i);
   assert.match(prompt, /honorários/i);
   assert.match(prompt, /13h30/);
+});
+
+test('sanitizeAssistantHistory enforces turn/char caps and redacts sensitive tokens including JWTs', () => {
+  const fakeJwt = 'eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.signatureTokenXYZ123';
+  const rawHistory = Array.from({ length: 24 }, (_, idx) => ({
+    role: idx % 2 === 0 ? 'user' : 'model',
+    text:
+      idx === 23
+        ? `Token vazado ${fakeJwt} e ${'x'.repeat(MAX_HISTORY_MESSAGE_CHARS + 500)}`
+        : `Turno ${idx + 1}`,
+  }));
+
+  const cleaned = sanitizeAssistantHistory(rawHistory);
+  assert.equal(cleaned.length, MAX_HISTORY_TURNS);
+  assert.equal(cleaned[0].text, 'Turno 9');
+  const last = cleaned[cleaned.length - 1];
+  assert.ok(last.text.length <= MAX_HISTORY_MESSAGE_CHARS);
+  assert.doesNotMatch(last.text, /eyJhbGciOiJSUzI1NiJ9/);
+  assert.match(last.text, /\[credencial ocultada\]/);
+
+  const redactedDirect = redactSensitiveTokens(
+    'api_key=super_secret_123456 Bearer abcdefghijklmnopqrst'
+  );
+  assert.doesNotMatch(redactedDirect, /super_secret_123456/);
+  assert.doesNotMatch(redactedDirect, /abcdefghijklmnopqrst/);
+});
+
+test('sanitizeAssistantDocumentAttachment validates MIME types, size limits, and redacts text attachments', () => {
+  const validPdf = sanitizeAssistantDocumentAttachment({
+    nome: 'Contrato Barreto.pdf',
+    mimeType: 'application/pdf',
+    formato: 'base64',
+    conteudo: 'JVBERi0xLjQK',
+  });
+  assert.equal(validPdf.ok, true);
+  if (validPdf.ok) {
+    assert.equal(validPdf.attachment?.mimeType, 'application/pdf');
+    assert.equal(validPdf.attachment?.formato, 'base64');
+  }
+
+  const blockedExe = sanitizeAssistantDocumentAttachment({
+    nome: 'payload.exe',
+    mimeType: 'application/x-msdownload',
+    formato: 'base64',
+    conteudo: 'TVqQAAMAAAA=',
+  });
+  assert.equal(blockedExe.ok, false);
+  if (!blockedExe.ok) {
+    assert.equal(blockedExe.status, 400);
+  }
+
+  const oversized = sanitizeAssistantDocumentAttachment({
+    nome: 'gigante.pdf',
+    mimeType: 'application/pdf',
+    formato: 'base64',
+    conteudo: 'A'.repeat(MAX_DOCUMENT_BASE64_CHARS + 10),
+  });
+  assert.equal(oversized.ok, false);
+  if (!oversized.ok) {
+    assert.equal(oversized.status, 413);
+  }
+
+  const textDoc = sanitizeAssistantDocumentAttachment({
+    nome: 'peticao.txt',
+    mimeType: 'text/plain',
+    formato: 'texto',
+    conteudo: 'Conteúdo com AIzaSySecretKeyValue123456789012345',
+  });
+  assert.equal(textDoc.ok, true);
+  if (textDoc.ok) {
+    assert.doesNotMatch(textDoc.attachment?.conteudo ?? '', /AIzaSySecretKeyValue/);
+    assert.match(textDoc.attachment?.conteudo ?? '', /\[credencial ocultada\]/);
+  }
+});
+
+test('buildPortfolioContextSummary includes SSOT breakdown, partial remaining amount, integrity health report, and Google-sovereign ZapSign summary', () => {
+  const enrichedClients: ClientCase[] = [
+    {
+      ...sampleClients[0],
+      undatedBalance: 47750,
+      unlinkedCredit: 500,
+      installments: [
+        {
+          ...sampleClients[0].installments[0],
+          amount: 666.68,
+          receivedAmount: 666.67,
+          remainingAmount: 0.01,
+          dueDate: '2026-11-10',
+        },
+      ],
+    },
+  ];
+
+  const summary = buildPortfolioContextSummary(enrichedClients, [], '2026-11-27', {
+    activeTab: 'dashboard',
+    selectedMonthKey: '2026-11',
+    healthReport: {
+      checkedAt: '2026-11-27T12:00:00Z',
+      ssotAuthority: 'Google Sheets',
+      totalClients: 1,
+      healthyClientsCount: 0,
+      clientsWithWarningsCount: 1,
+      missingDriveCount: 1,
+      missingCalendarEventsCount: 2,
+      corruptedRowsCount: 0,
+      parseIssues: [],
+      warningsByClientId: {},
+      healthByClientId: {
+        c1: {
+          clientId: 'c1',
+          clientName: 'Mariana Souza Almeida',
+          healthy: false,
+          driveOk: false,
+          driveUrlValid: false,
+          calendarOk: false,
+          pendingInstallmentsCount: 2,
+          pendingWithCalendarCount: 0,
+          missingCalendarDueDates: ['2026-11-10', '2026-12-10'],
+          corruptedRowCount: 0,
+          warnings: [],
+        },
+      },
+    },
+    zapSignDocs: [
+      {
+        token: 'zs-ok',
+        name: 'Contrato - Mariana.pdf',
+        signedAt: '2026-11-10',
+        signers: [{ name: 'Mariana Souza Almeida' }],
+      },
+    ],
+    googleValidatedZapSignItems: [
+      {
+        doc: {
+          token: 'zs-drv',
+          name: 'Contrato Drive.pdf',
+          status: 'signed',
+          createdAt: '2026-11-01',
+          signedAt: '2026-11-02',
+          signers: [{ name: 'Cliente Drive' }],
+        },
+        primarySignerName: 'Cliente Drive',
+        auditStatus: 'matched_google_ecosystem',
+        inSpreadsheet: false,
+      },
+    ],
+    proceduralZapSignCount: 1,
+    excludedZapSignCount: 9,
+  });
+
+  assert.match(summary, /Parcelas datadas:/);
+  assert.match(summary, /Saldo sem data: R\$\s*47\.750,00/);
+  assert.match(summary, /Crédito a vincular: R\$\s*500,00/);
+  assert.match(summary, /saldo parcial de R\$\s*666,68/);
+  assert.match(summary, /AUDITORIA DE INTEGRIDADE \(PLANILHA SSOT × DRIVE × CALENDAR\):/);
+  assert.match(summary, /Sem pasta válida no Drive: 1/);
+  assert.match(summary, /Coligação soberana Google/);
+  assert.match(summary, /100% conciliado/);
 });

@@ -10,7 +10,6 @@ import {
   MessageSquare,
   RotateCcw,
   Send,
-  Sparkles,
   X,
 } from 'lucide-react';
 import {
@@ -19,16 +18,18 @@ import {
   ClientCase,
   DriveFileItem,
 } from '../types/honorarios';
-import { fetchDriveFileContent } from '../services/googleWorkspace';
+import { fetchDriveFileContentAuthenticated } from '../services/googleWorkspace';
 import { getFirebaseIdToken } from '../services/googleAuth';
 import {
   ASSISTANT_NAME,
   AssistantContextExtras,
+  MAX_HISTORY_TURNS,
   buildDocumentAnalysisPrompt,
   buildPortfolioContextSummary,
   findDocumentReferenceInQuery,
   getActiveTabLabel,
 } from '../utils/assistantContext';
+import { DonaAvatar } from './DonaAvatar';
 
 export interface PendingDocumentAnalysisRequest {
   requestId: string;
@@ -101,18 +102,6 @@ function renderInlineBold(text: string): React.ReactNode[] {
     }
     return <React.Fragment key={idx}>{part}</React.Fragment>;
   });
-}
-
-function DonaMonogram({ size = 'md' }: { size?: 'sm' | 'md' }) {
-  const boxClass = size === 'sm' ? 'h-8 w-8 text-sm' : 'h-9 w-9 text-base';
-  return (
-    <span
-      aria-hidden="true"
-      className={`flex ${boxClass} shrink-0 items-center justify-center rounded-lg border border-[#DCB14A]/75 bg-[#DCB14A]/15 font-serif font-bold text-[#FFD559]`}
-    >
-      D
-    </span>
-  );
 }
 
 export const AssistantChatWidget: React.FC<AssistantChatWidgetProps> = ({
@@ -204,14 +193,23 @@ export const AssistantChatWidget: React.FC<AssistantChatWidgetProps> = ({
         : undefined,
     };
 
-    const historySnapshot = messagesRef.current.map((m) => ({
-      role: m.role,
-      text: m.text,
-    }));
+    const historySnapshot = messagesRef.current
+      .slice(-MAX_HISTORY_TURNS)
+      .map((m) => ({
+        role: m.role,
+        text: m.text,
+      }));
 
     onMessagesChange((prev) => [...prev, userMsg]);
 
     try {
+      const idToken = await getFirebaseIdToken();
+      if (!idToken) {
+        throw new Error(
+          'Sua sessão expirou. Faça login novamente com uma conta Google autorizada.'
+        );
+      }
+
       let documentAttachment:
         | {
             nome: string;
@@ -223,20 +221,15 @@ export const AssistantChatWidget: React.FC<AssistantChatWidgetProps> = ({
 
       if (detectedDoc) {
         setLoadingStage('reading_drive');
-        const fileData = await fetchDriveFileContent(
-          appsScriptUrl,
-          detectedDoc.file.id
+        const fileData = await fetchDriveFileContentAuthenticated(
+          idToken,
+          detectedDoc.file.id,
+          appsScriptUrl
         );
         documentAttachment = fileData;
       }
 
       setLoadingStage('thinking');
-      const idToken = await getFirebaseIdToken();
-      if (!idToken) {
-        throw new Error(
-          'Sua sessão expirou. Faça login novamente com uma conta Google autorizada.'
-        );
-      }
 
       const res = await fetch('/api/assistant/chat', {
         method: 'POST',
@@ -330,9 +323,9 @@ export const AssistantChatWidget: React.FC<AssistantChatWidgetProps> = ({
           onClick={() => onOpenChange(true)}
           data-testid="assistant-fab"
           aria-label={`Abrir chat com a ${ASSISTANT_NAME} (Assistente do Barreto Flow)`}
-          className="fixed bottom-5 right-5 z-40 inline-flex items-center gap-2.5 rounded-xl border border-[#DCB14A]/65 bg-[#313131] px-4 py-3 text-left text-white shadow-lg transition-transform hover:-translate-y-0.5 hover:bg-[#313131]/95 focus:outline-none focus:ring-2 focus:ring-[#DCB14A]"
+          className="fixed bottom-5 right-5 z-40 inline-flex items-center gap-2.5 rounded-xl border border-[#DCB14A]/65 bg-[#313131] px-3.5 py-2.5 text-left text-white shadow-lg transition-transform hover:-translate-y-0.5 hover:bg-[#313131]/95 focus:outline-none focus:ring-2 focus:ring-[#DCB14A]"
         >
-          <DonaMonogram size="sm" />
+          <DonaAvatar size="sm" decorative />
           <span className="leading-tight">
             <span className="block font-serif text-sm font-bold text-white">
               {ASSISTANT_NAME}
@@ -361,7 +354,7 @@ export const AssistantChatWidget: React.FC<AssistantChatWidgetProps> = ({
             {/* Header */}
             <div className="flex items-center justify-between gap-3 border-b border-white/10 bg-[#313131] px-5 py-4 text-white">
               <div className="flex items-center gap-3 min-w-0">
-                <DonaMonogram size="md" />
+                <DonaAvatar size="md" />
                 <div className="min-w-0">
                   <h2 className="font-serif text-base font-bold text-white truncate">
                     {ASSISTANT_NAME}
@@ -416,11 +409,16 @@ export const AssistantChatWidget: React.FC<AssistantChatWidgetProps> = ({
             <div className="flex-1 overflow-y-auto px-4 py-4 space-y-3">
               {messages.length === 0 ? (
                 <div className="rounded-xl border border-[#313131]/12 bg-white p-4 space-y-2.5">
-                  <div className="flex items-center gap-2 text-xs font-semibold text-[#8D6A14]">
-                    <Sparkles className="h-3.5 w-3.5 shrink-0" />
-                    <span>
-                      Olá! Sou a {ASSISTANT_NAME}, assistente do Barreto Flow.
-                    </span>
+                  <div className="flex items-center gap-3">
+                    <DonaAvatar size="lg" />
+                    <div className="min-w-0">
+                      <p className="font-serif text-sm font-bold text-[#313131]">
+                        Olá! Sou a {ASSISTANT_NAME}
+                      </p>
+                      <p className="text-[11px] font-medium text-[#8D6A14]">
+                        Assistente executiva do Barreto Flow
+                      </p>
+                    </div>
                   </div>
                   <p className="text-xs leading-relaxed text-[#313131]/80">
                     Acompanho a carteira carregada nesta sessão — honorários,
@@ -453,9 +451,12 @@ export const AssistantChatWidget: React.FC<AssistantChatWidgetProps> = ({
                       }`}
                     >
                       {msg.role === 'model' && (
-                        <p className="mb-1.5 text-[10px] font-semibold uppercase tracking-wider text-[#8D6A14]">
-                          {ASSISTANT_NAME}
-                        </p>
+                        <div className="mb-1.5 flex items-center gap-1.5">
+                          <DonaAvatar size="xs" decorative />
+                          <p className="text-[10px] font-semibold uppercase tracking-wider text-[#8D6A14]">
+                            {ASSISTANT_NAME}
+                          </p>
+                        </div>
                       )}
 
                       {msg.attachedDocument && (

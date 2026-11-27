@@ -1585,8 +1585,13 @@ export default function App() {
       zapSignDocs: zapSignState.docs,
       unmatchedZapSignDocs: zapSignMatchResult.unmatchedDocs,
       unmatchedZapSignItems: zapSignMatchResult.unmatchedAuditItems,
+      googleValidatedZapSignItems: zapSignMatchResult.googleValidatedAuditItems,
+      proceduralZapSignCount: zapSignMatchResult.proceduralAuditItems.length,
+      excludedZapSignCount: zapSignMatchResult.excludedFolderItems.length,
       officialDashboard,
       payments: paymentsLedger,
+      healthReport,
+      parseIssues,
     }),
     [
       activeTab,
@@ -1602,8 +1607,13 @@ export default function App() {
       zapSignState.docs,
       zapSignMatchResult.unmatchedDocs,
       zapSignMatchResult.unmatchedAuditItems,
+      zapSignMatchResult.googleValidatedAuditItems,
+      zapSignMatchResult.proceduralAuditItems.length,
+      zapSignMatchResult.excludedFolderItems.length,
       officialDashboard,
       paymentsLedger,
+      healthReport,
+      parseIssues,
     ]
   );
 

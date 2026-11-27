@@ -8,6 +8,10 @@ import type {
   DriveFileItem,
   ZapSignCrossReferenceItem,
 } from '../types/honorarios.ts';
+import type {
+  PortfolioHealthReport,
+  RowParseIssue,
+} from './appsScriptMapper.ts';
 import {
   addDaysISO,
   calculateClientTotals,
@@ -23,9 +27,143 @@ export const ASSISTANT_NAME = 'Dona';
 export const ASSISTANT_FIRM_NAME = 'Barreto Advocacia';
 export const ASSISTANT_ROLE_LABEL = 'Assistente Financeira e Operacional';
 export const MAX_PORTFOLIO_CONTEXT_CHARS = 48000;
+export const MAX_HISTORY_TURNS = 16;
+export const MAX_HISTORY_MESSAGE_CHARS = 4000;
+export const MAX_USER_MESSAGE_CHARS = 8000;
+export const MAX_DOCUMENT_TEXT_CHARS = 100000;
+export const MAX_DOCUMENT_BASE64_CHARS = 16_500_000; // ~12 MB binary payload
+
+export const ALLOWED_ASSISTANT_DOCUMENT_MIMES = new Set([
+  'application/pdf',
+  'text/plain',
+  'text/csv',
+  'text/markdown',
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  'application/msword',
+  'image/jpeg',
+  'image/png',
+  'image/webp',
+]);
+
+export interface AssistantHistoryTurn {
+  role: 'user' | 'model';
+  text: string;
+}
+
+export interface AssistantDocumentAttachment {
+  nome: string;
+  mimeType: string;
+  formato: 'base64' | 'texto';
+  conteudo: string;
+}
+
+const SECRET_PATTERN =
+  /\b(?:AIza[0-9A-Za-z_-]{20,}|ya29\.[0-9A-Za-z._-]{15,}|sk-[0-9A-Za-z_-]{16,}|Bearer\s+[0-9A-Za-z._-]{16,}|eyJ[0-9A-Za-z_-]{10,}\.[0-9A-Za-z_-]{10,}\.[0-9A-Za-z_-]{10,}|(?:api[_-]?key|access[_-]?token|zapsign[_-]?api[_-]?token)\s*[:=]\s*[^\s,;]{8,})\b/gi;
+
+export function redactSensitiveTokens(value: unknown): string {
+  return String(value ?? '').replace(SECRET_PATTERN, '[credencial ocultada]');
+}
+
+export function sanitizeAssistantHistory(
+  rawHistory: unknown
+): AssistantHistoryTurn[] {
+  if (!Array.isArray(rawHistory)) return [];
+  const sanitized: AssistantHistoryTurn[] = [];
+  for (const item of rawHistory.slice(-MAX_HISTORY_TURNS)) {
+    if (!item || typeof item !== 'object') continue;
+    const entry = item as { role?: unknown; text?: unknown };
+    const cleanText = redactSensitiveTokens(entry.text ?? '').trim();
+    if (!cleanText) continue;
+    const clipped =
+      cleanText.length > MAX_HISTORY_MESSAGE_CHARS
+        ? `${cleanText.slice(0, MAX_HISTORY_MESSAGE_CHARS - 1).trimEnd()}…`
+        : cleanText;
+    sanitized.push({
+      role: entry.role === 'model' ? 'model' : 'user',
+      text: clipped,
+    });
+  }
+  return sanitized;
+}
+
+export function sanitizeAssistantDocumentAttachment(raw: unknown):
+  | { ok: true; attachment?: AssistantDocumentAttachment }
+  | { ok: false; status: 400 | 413; error: string } {
+  if (raw === null || raw === undefined) {
+    return { ok: true, attachment: undefined };
+  }
+  if (typeof raw !== 'object') {
+    return {
+      ok: false,
+      status: 400,
+      error: 'Anexo de documento em formato inválido.',
+    };
+  }
+  const obj = raw as Record<string, unknown>;
+  const formatoRaw = String(obj.formato ?? '').toLowerCase().trim();
+  const formato: 'base64' | 'texto' =
+    formatoRaw === 'base64' ? 'base64' : 'texto';
+  const rawContent = String(obj.conteudo ?? '');
+  if (!rawContent) {
+    return { ok: true, attachment: undefined };
+  }
+
+  const nome = sanitizeContextText(obj.nome ?? 'Documento', 140) || 'Documento';
+  const rawMime = String(obj.mimeType ?? '')
+    .split(';')[0]
+    .trim()
+    .toLowerCase();
+
+  if (formato === 'base64') {
+    if (rawContent.length > MAX_DOCUMENT_BASE64_CHARS) {
+      return {
+        ok: false,
+        status: 413,
+        error:
+          'O documento anexado excede o limite de 12 MB suportado para análise pela Dona.',
+      };
+    }
+    const mimeType = rawMime || 'application/pdf';
+    if (!ALLOWED_ASSISTANT_DOCUMENT_MIMES.has(mimeType)) {
+      return {
+        ok: false,
+        status: 400,
+        error:
+          'Tipo de arquivo não suportado para análise direta. Utilize PDF, DOCX, TXT ou imagem.',
+      };
+    }
+    return {
+      ok: true,
+      attachment: {
+        nome,
+        mimeType,
+        formato: 'base64',
+        conteudo: rawContent,
+      },
+    };
+  }
+
+  const cleanText = redactSensitiveTokens(rawContent).slice(
+    0,
+    MAX_DOCUMENT_TEXT_CHARS
+  );
+  return {
+    ok: true,
+    attachment: {
+      nome,
+      mimeType: ALLOWED_ASSISTANT_DOCUMENT_MIMES.has(rawMime)
+        ? rawMime
+        : 'text/plain',
+      formato: 'texto',
+      conteudo: cleanText,
+    },
+  };
+}
 
 export function buildDonaSystemPrompt(portfolioContext: string): string {
-  const trimmedContext = String(portfolioContext ?? '').trim();
+  const safeContext = redactSensitiveTokens(portfolioContext ?? '')
+    .slice(0, MAX_PORTFOLIO_CONTEXT_CHARS)
+    .trim();
 
   return [
     `Você é ${ASSISTANT_NAME}, a ${ASSISTANT_ROLE_LABEL.toLowerCase()} exclusiva da ${ASSISTANT_FIRM_NAME} (especializada em Direito de Família) no painel Barreto Flow.`,
@@ -33,14 +171,14 @@ export function buildDonaSystemPrompt(portfolioContext: string): string {
     '',
     'PRIORIDADES E REGRAS OPERACIONAIS:',
     '1. ESTILO EXECUTIVO: Abra sempre com o resumo objetivo do que exige ação imediata (valores em aberto, atrasos, vencimentos do dia/semana e alertas), usando tópicos curtos, valores em R$ (padrão brasileiro) e datas em DD/MM/AAAA.',
-    '2. FIDELIDADE ABSOLUTA AOS DADOS: Nunca invente clientes, valores, datas, números de processo, parcelas, status ou fatos que não estejam explicitamente presentes no contexto da sessão ou no documento anexado. Se faltar algum dado, sinalize objetivamente a ausência e indique onde confirmar (planilha oficial, Google Drive ou nova sincronização).',
-    '3. MODO SOMENTE LEITURA: Nunca afirme que alterou a planilha oficial ou o Google Calendar. Quando houver pendência de atualização, informe de forma enxuta qual linha/cliente ajustar na planilha "Barreto — Honorários (Ads Família)" ou qual compromisso registrar na agenda (janela padrão 13h30 às 14h30).',
-    '4. COBRANÇAS WHATSAPP: Ao redigir mensagens de cobrança, mantenha tom humano, respeitoso e firme, informando parcela, valor, vencimento e a chave PIX oficial da Barreto Advocacia (barretoadvocacia01@gmail.com) quando aplicável.',
+    '2. FIDELIDADE ABSOLUTA AOS DADOS: Nunca invente clientes, valores, datas, números de processo, parcelas, status ou fatos que não estejam explicitamente presentes no contexto da sessão ou no documento anexado. Quando explicar o Saldo Total a Receber, respeite exatamente a composição oficial da planilha (Parcelas Datadas + Saldo sem Data + Crédito a Vincular) e, em parcelas parciais, cite sempre o saldo efetivamente pendente. Se faltar algum dado, sinalize objetivamente a ausência e indique onde confirmar (planilha oficial, Google Drive ou nova sincronização).',
+    '3. MODO SOMENTE LEITURA: Nunca afirme que alterou a planilha oficial ou o Google Calendar. Quando houver pendência de atualização ou alerta de integridade, informe de forma enxuta qual linha/cliente ajustar na planilha "Barreto — Honorários (Ads Família)" ou qual compromisso registrar na agenda (janela padrão 13h30 às 14h30).',
+    '4. COBRANÇAS WHATSAPP: Ao redigir mensagens de cobrança, mantenha tom humano, respeitoso e firme, informando parcela, valor pendente, vencimento e a chave PIX oficial da Barreto Advocacia (barretoadvocacia01@gmail.com) quando aplicável.',
     '5. ANÁLISE DE DOCUMENTOS DO DRIVE: Ao analisar contratos, procurações, decisões ou protocolos anexados, extraia em tópicos objetivos apenas o que constar no documento: (a) número do processo e objeto; (b) datas e prazos relevantes; (c) valores de honorários, entrada, parcelas e êxito; (d) regras de vencimento/pagamento; (e) ajustes recomendados na planilha ou agenda.',
-    '6. METAS, PROJEÇÕES E AUDITORIA ZAPSIGN: Quando consultada sobre metas/ROI ou auditoria, compare objetivamente a meta do mês com Previsto/Recebido e o Simulador (calculando contratos faltantes para bater a meta) ou liste exatamente os contratos assinados no ZapSign sem cadastro/parcelas confirmadas na planilha.',
+    '6. METAS, PROJEÇÕES, INTEGRIDADE E AUDITORIA ZAPSIGN: Quando consultada sobre metas/ROI ou auditoria, compare objetivamente a meta do mês com Previsto/Recebido e o Simulador (calculando contratos faltantes para bater a meta), relate alertas de integridade (Planilha × Drive × Calendar) quando relevantes, e respeite a soberania do ecossistema Google (Planilha oficial + pasta ativa no Drive "Clientes Tráfego Pago") ao listar apenas contratos assinados no ZapSign realmente pendentes de cadastro.',
     '',
-    trimmedContext
-      ? `CONTEXTO ATUAL DA SESSÃO E DA CARTEIRA (${ASSISTANT_FIRM_NAME} — BARRETO FLOW):\n${trimmedContext}`
+    safeContext
+      ? `CONTEXTO ATUAL DA SESSÃO E DA CARTEIRA (${ASSISTANT_FIRM_NAME} — BARRETO FLOW):\n${safeContext}`
       : 'Nenhum dado adicional da carteira foi enviado nesta chamada.',
   ].join('\n');
 }
@@ -100,8 +238,13 @@ export interface AssistantContextExtras {
     signers: Array<{ name: string }>;
   }>;
   unmatchedZapSignItems?: ZapSignCrossReferenceItem[];
+  googleValidatedZapSignItems?: ZapSignCrossReferenceItem[];
+  proceduralZapSignCount?: number;
+  excludedZapSignCount?: number;
   officialDashboard?: AppsScriptDashboardSnapshot | null;
   payments?: AppsScriptPaymentRow[];
+  healthReport?: PortfolioHealthReport | null;
+  parseIssues?: RowParseIssue[];
 }
 
 const VIEW_LABELS: Record<ActiveTab, string> = {
@@ -112,14 +255,10 @@ const VIEW_LABELS: Record<ActiveTab, string> = {
   configuracoes: 'Configurações & Conexão Google',
 };
 
-const SECRET_PATTERN =
-  /\b(?:AIza[0-9A-Za-z_-]{20,}|ya29\.[0-9A-Za-z._-]{15,}|sk-[0-9A-Za-z_-]{16,}|Bearer\s+[0-9A-Za-z._-]{16,})\b/gi;
-
 export function sanitizeContextText(value: unknown, maxLen = 180): string {
-  const cleaned = String(value ?? '')
+  const cleaned = redactSensitiveTokens(value ?? '')
     .replace(/[\r\n\t]+/g, ' ')
     .replace(/\s{2,}/g, ' ')
-    .replace(SECRET_PATTERN, '[credencial ocultada]')
     .trim();
   if (cleaned.length <= maxLen) return cleaned;
   return `${cleaned.slice(0, Math.max(0, maxLen - 1)).trimEnd()}…`;
@@ -244,8 +383,12 @@ export function buildPortfolioContextSummary(
     lines.push('- Nenhuma parcela vencida ou vencendo hoje.');
   } else {
     for (const item of attention.slice(0, 35)) {
+      const pendingValue =
+        item.remainingAmount !== undefined && item.remainingAmount < item.amount
+          ? `${formatCurrencyBRL(item.remainingAmount)} (saldo parcial de ${formatCurrencyBRL(item.amount)})`
+          : formatCurrencyBRL(item.amount);
       lines.push(
-        `- ${sanitizeContextText(item.clientName, 80)} | Tel: ${sanitizeContextText(item.clientPhone, 30)} | Objeto: ${sanitizeContextText(item.caseType, 70)} | Parcela ${item.installmentNumber}/${item.totalInstallments} | Valor: ${formatCurrencyBRL(item.amount)} | Venc: ${formatDateBR(item.dueDate)} | Status: ${item.status}`
+        `- ${sanitizeContextText(item.clientName, 80)} | Tel: ${sanitizeContextText(item.clientPhone, 30)} | Objeto: ${sanitizeContextText(item.caseType, 70)} | Parcela ${item.installmentNumber}/${item.totalInstallments} | Valor: ${pendingValue} | Venc: ${formatDateBR(item.dueDate)} | Status: ${item.status}`
       );
     }
     if (attention.length > 35) {
@@ -259,12 +402,56 @@ export function buildPortfolioContextSummary(
     lines.push('- Nenhum vencimento nos próximos 7 dias.');
   } else {
     for (const item of upcomingWeek.slice(0, 25)) {
+      const pendingValue =
+        item.remainingAmount !== undefined && item.remainingAmount < item.amount
+          ? `${formatCurrencyBRL(item.remainingAmount)} (parcial de ${formatCurrencyBRL(item.amount)})`
+          : formatCurrencyBRL(item.amount);
       lines.push(
-        `- ${sanitizeContextText(item.clientName, 80)} | Parcela ${item.installmentNumber}/${item.totalInstallments} | Valor: ${formatCurrencyBRL(item.amount)} | Venc: ${formatDateBR(item.dueDate)}`
+        `- ${sanitizeContextText(item.clientName, 80)} | Parcela ${item.installmentNumber}/${item.totalInstallments} | Valor: ${pendingValue} | Venc: ${formatDateBR(item.dueDate)}`
       );
     }
     if (upcomingWeek.length > 25) {
       lines.push(`... e mais ${upcomingWeek.length - 25} parcela(s) na semana.`);
+    }
+  }
+
+  const effectiveParseIssues =
+    extras?.parseIssues && extras.parseIssues.length > 0
+      ? extras.parseIssues
+      : (extras?.healthReport?.parseIssues ?? []);
+  if (extras?.healthReport || effectiveParseIssues.length > 0) {
+    const hr = extras?.healthReport;
+    lines.push('');
+    lines.push('AUDITORIA DE INTEGRIDADE (PLANILHA SSOT × DRIVE × CALENDAR):');
+    lines.push(
+      `- Células com erro de data/valor isoladas: ${effectiveParseIssues.length} | Clientes íntegros: ${hr?.healthyClientsCount ?? clients.length} | Clientes com alerta operacional: ${hr?.clientsWithWarningsCount ?? 0} | Sem pasta válida no Drive: ${hr?.missingDriveCount ?? 0} | Parcelas pendentes sem evento no Calendar: ${hr?.missingCalendarEventsCount ?? 0}`
+    );
+    if (effectiveParseIssues.length > 0) {
+      for (const issue of effectiveParseIssues.slice(0, 6)) {
+        lines.push(
+          `- ERRO CÉLULA (${issue.scope}): ${sanitizeContextText(issue.clientName, 60)} | Campo "${sanitizeContextText(issue.field, 30)}" = "${sanitizeContextText(issue.rawValue, 40)}" (${sanitizeContextText(issue.reason, 80)})`
+        );
+      }
+    }
+    if (hr && hr.clientsWithWarningsCount > 0) {
+      const flaggedClients = Object.values(hr.healthByClientId)
+        .filter((h) => !h.healthy)
+        .slice(0, 8);
+      for (const entry of flaggedClients) {
+        const flags: string[] = [];
+        if (!entry.driveOk) flags.push('sem pasta válida no Drive');
+        if (!entry.calendarOk) {
+          flags.push(
+            `${entry.missingCalendarDueDates.length} parcela(s) sem evento no Calendar`
+          );
+        }
+        if (entry.corruptedRowCount > 0) {
+          flags.push(`${entry.corruptedRowCount} célula(s) isolada(s)`);
+        }
+        lines.push(
+          `- ALERTA CLIENTE: ${sanitizeContextText(entry.clientName, 65)} → ${flags.join(', ')}`
+        );
+      }
     }
   }
 
@@ -322,19 +509,32 @@ export function buildPortfolioContextSummary(
           `... e mais ${extras.zapSignDocs.length - 30} documento(s) assinado(s) no ZapSign.`
         );
       }
+      const googleValidatedCount =
+        extras.googleValidatedZapSignItems?.length ?? 0;
+      const proceduralCount = extras.proceduralZapSignCount ?? 0;
+      const excludedCount = extras.excludedZapSignCount ?? 0;
+      if (googleValidatedCount > 0 || proceduralCount > 0 || excludedCount > 0) {
+        lines.push(
+          `- Coligação soberana Google (Planilha + Drive "Clientes Tráfego Pago" + Calendar): ${googleValidatedCount} validado(s) via pasta ativa no Drive | ${proceduralCount} documento(s) processuais separados | ${excludedCount} encerrado(s)/pasta ignorada (ZZ - Encerrados, Docs Faltavam, Fechados do Escritório).`
+        );
+      }
       if (
         extras.unmatchedZapSignItems &&
         extras.unmatchedZapSignItems.length > 0
       ) {
         lines.push(
-          `CONTRATOS ASSINADOS NO ZAPSIGN QUE NÃO CONSTAM NA PLANILHA (${extras.unmatchedZapSignItems.length}, excluindo ZZ - Encerrados):`
+          `CONTRATOS ASSINADOS NO ZAPSIGN QUE NÃO CONSTAM NA PLANILHA (${extras.unmatchedZapSignItems.length} cliente(s) deduplicado(s), excluindo pastas ignoradas e clientes já validados no Drive):`
         );
         for (const item of extras.unmatchedZapSignItems.slice(0, 25)) {
           const driveLabel = item.driveFolder
             ? `Pasta no Drive: ${sanitizeContextText(item.driveFolder.etapa, 60)}`
             : 'Sem pasta no Drive';
+          const groupedLabel =
+            (item.groupedDocsCount ?? 1) > 1
+              ? ` | ${item.groupedDocsCount} docs agrupados`
+              : '';
           lines.push(
-            `- ALERTA AUDITORIA: Signatário ${sanitizeContextText(item.primarySignerName, 70)} | Doc: "${sanitizeContextText(item.doc.name, 90)}" (Assinado em ${sanitizeContextText(item.doc.signedAt, 30)}) | ${driveLabel}`
+            `- ALERTA AUDITORIA: Signatário ${sanitizeContextText(item.primarySignerName, 70)} | Doc: "${sanitizeContextText(item.doc.name, 90)}" (Assinado em ${sanitizeContextText(item.doc.signedAt, 30)}) | ${driveLabel}${groupedLabel}`
           );
         }
       } else if (
@@ -351,7 +551,7 @@ export function buildPortfolioContextSummary(
         }
       } else {
         lines.push(
-          '- Auditoria ZapSign × Planilha × Drive: todos os documentos assinados ativos possuem correspondência na planilha (itens em ZZ - Encerrados marcados como Encerrado (não cobrar)).'
+          '- Auditoria ZapSign × Planilha × Drive: 100% conciliado — todos os documentos assinados ativos possuem correspondência na planilha ou no Google Drive "Clientes Tráfego Pago" (itens em ZZ - Encerrados, Docs Faltavam e Fechados do Escritório ignorados).'
         );
       }
     }
@@ -375,11 +575,22 @@ export function buildPortfolioContextSummary(
     const processLabel = c.processNumber
       ? `Processo: ${sanitizeContextText(c.processNumber, 40)}`
       : 'Sem nº de processo informado';
+    const extraFinancial: string[] = [];
+    if ((c.undatedBalance ?? 0) > 0) {
+      extraFinancial.push(`Sem data: ${formatCurrencyBRL(c.undatedBalance ?? 0)}`);
+    }
+    if ((c.unlinkedCredit ?? 0) > 0) {
+      extraFinancial.push(
+        `Crédito a vincular: ${formatCurrencyBRL(c.unlinkedCredit ?? 0)}`
+      );
+    }
+    const extraFinancialLabel =
+      extraFinancial.length > 0 ? ` | ${extraFinancial.join(' | ')}` : '';
     const notesLabel = c.notes
       ? ` | Obs: ${sanitizeContextText(c.notes, 120)}`
       : '';
     lines.push(
-      `- ${sanitizeContextText(c.fullName, 80)} | Objeto: ${sanitizeContextText(c.caseType, 70)} | ${processLabel} | ${sanitizeContextText(c.driveStage, 50)} | ${c.modality} | Situação: ${totals.situacao} (${totals.paidCount}/${totals.totalInstallmentsCount} parcelas) | Contratado: ${formatCurrencyBRL(totals.totalContratado)} | Pago: ${formatCurrencyBRL(totals.totalPago)} | Restante: ${formatCurrencyBRL(totals.saldoRestante)}${notesLabel} | Arquivos Drive: ${filesLabel}`
+      `- ${sanitizeContextText(c.fullName, 80)} | Objeto: ${sanitizeContextText(c.caseType, 70)} | ${processLabel} | ${sanitizeContextText(c.driveStage, 50)} | ${c.modality} | Situação: ${c.isCanceled ? 'Cancelado' : totals.situacao} (${totals.paidCount}/${totals.totalInstallmentsCount} parcelas) | Contratado: ${formatCurrencyBRL(totals.totalContratado)} | Pago: ${formatCurrencyBRL(totals.totalPago)} | Restante: ${formatCurrencyBRL(totals.saldoRestante)}${extraFinancialLabel}${notesLabel} | Arquivos Drive: ${filesLabel}`
     );
   }
 
