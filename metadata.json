@@ -1,5 +1,5 @@
 {
-  "name": "Barreto Advocacia — Gestão de Honorários",
+  "name": "Barreto Flow — Barreto Advocacia Especializada",
   "description": "Sistema interno simplificado de gestão de honorários, cobranças e acompanhamento de processos para a Barreto Advocacia Especializada.",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
